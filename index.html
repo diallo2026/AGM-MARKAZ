@@ -1192,6 +1192,15 @@ async function doJoinMarkaz(){
     if (data && data.users){
       DB = data;
       DB.markazInfo = remote;
+      // Garantit la présence de toutes les collections, même si les
+      // données reçues du cloud n'en contiennent pas encore certaines
+      // (même normalisation que loadDB() / cloudApplyRemote()).
+      ['users','teachers','students','juz','progressions','evaluations','transactions','payments','purchases','salaries','consumables','stockMovements','archives']
+        .forEach(function(k){ if (!Array.isArray(DB[k])) DB[k] = []; });
+      if (!DB.juz || !DB.juz.length) DB.juz = JUZ_NAMES.map((n,i)=>({ number:i+1, name_fr:n }));
+      if (typeof DB.matriculeSeq !== 'number') DB.matriculeSeq = 0;
+      if (typeof DB.receiptSeq !== 'number') DB.receiptSeq = 0;
+      try { ensureExt(); } catch(e){}
       saveDB();
       prog.style.display='none';
       toast('Markaz charg\u00e9 : ' + remote.name);
@@ -6655,6 +6664,12 @@ function importData(evt){
       const data = JSON.parse(reader.result);
       if (!confirm('Remplacer toutes les données actuelles par cette sauvegarde ?')) return;
       DB = data;
+      ['users','teachers','students','juz','progressions','evaluations','transactions','payments','purchases','salaries','consumables','stockMovements','archives']
+        .forEach(function(k){ if (!Array.isArray(DB[k])) DB[k] = []; });
+      if (!DB.juz || !DB.juz.length) DB.juz = JUZ_NAMES.map((n,i)=>({ number:i+1, name_fr:n }));
+      if (typeof DB.matriculeSeq !== 'number') DB.matriculeSeq = 0;
+      if (typeof DB.receiptSeq !== 'number') DB.receiptSeq = 0;
+      try { ensureExt(); } catch(e){}
       saveDB();
       toast('Données importées avec succès.');
       renderSettings();
