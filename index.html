@@ -19,6 +19,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
 <script>
 /* =====================================================================
    CONFIGURATION FIREBASE — SOURCE UNIQUE POUR TOUT LE PROJET AGM
@@ -45,6 +46,7 @@ const firebaseConfig = {
 };
 
 window.rtdb = null;
+window.storageRef = null;
 window._firebaseReady = false;
 window._firebaseAuthReady = false;
 
@@ -55,6 +57,7 @@ try {
     firebase.initializeApp(firebaseConfig);
     window.rtdb = firebase.database();
     try { window.rtdb.goOnline(); } catch(e){}
+    try { window.storageRef = firebase.storage(); } catch(e){ window.storageRef = null; }
     window._firebaseReady = true;
 
     /* Authentification anonyme : requise par les règles de sécurité
@@ -66,6 +69,7 @@ try {
     firebase.auth().signInAnonymously().then(function(){
       window._firebaseAuthReady = true;
       try { document.dispatchEvent(new Event('agm-firebase-auth-ready')); } catch(e){}
+      try { setTimeout(uploadAllPendingPhotos, 1500); } catch(e){}
     }).catch(function(e){
       console.warn('AGM: connexion anonyme Firebase impossible', e && e.message);
       window._firebaseAuthReady = false;
@@ -74,6 +78,8 @@ try {
 } catch(e) {
   window.rtdb = null; window._firebaseReady = false;
 }
+window.addEventListener('online', function(){ try { setTimeout(uploadAllPendingPhotos, 1000); } catch(e){} });
+
 </script>
 
 <style>
@@ -1779,6 +1785,7 @@ function saveStudent(){
   PENDING_PHOTO = null;
   DB.students.push(student);
   saveDB();
+  if (student.photo) queuePhotoUpload('students', student.id);
   closeModal();
   toast('Élève inscrit : ' + student.matricule);
 
@@ -5723,6 +5730,57 @@ function readPhotoFile(file, cb){
   reader.onerror = () => { toast('Lecture du fichier impossible.'); cb(null); };
   reader.readAsDataURL(file);
 }
+
+/* ---------------------------------------------------------------------
+   Envoi différé des photos vers Firebase Storage.
+   Tant que l'appareil est hors ligne (ou le markaz non relié au cloud),
+   la vignette compressée reste stockée localement (dataURL) — l'appli
+   fonctionne normalement, rien n'est bloqué. Dès que la connexion cloud
+   est disponible, chaque photo encore locale est envoyée une fois vers
+   Storage ; son adresse (URL, quelques octets) remplace alors le
+   dataURL (plusieurs dizaines de Ko) dans la base locale ET distante.
+   Cela évite de saturer le quota localStorage et allège la base cloud.
+   ------------------------------------------------------------------- */
+function dataURLToBlob(dataURL){
+  const parts = dataURL.split(',');
+  const mime = (parts[0].match(/:(.*?);/) || [,'image/jpeg'])[1];
+  const bin = atob(parts[1]);
+  const arr = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+}
+function uploadPhotoToStorage(kind, id, dataURL){
+  return new Promise((resolve) => {
+    if (!window.storageRef || !cloudLinked() || !dataURL || dataURL.indexOf('data:') !== 0){ resolve(null); return; }
+    try {
+      const path = 'agm_markaz/' + DB.markazInfo.markazId + '/' + kind + '/' + id + '.jpg';
+      const ref = window.storageRef.ref().child(path);
+      ref.putString(dataURL, 'data_url').then(() => ref.getDownloadURL()).then(url => resolve(url)).catch(() => resolve(null));
+    } catch(e){ resolve(null); }
+  });
+}
+/** Envoie la photo d'un élève ou d'un enseignant si elle est encore locale. */
+function queuePhotoUpload(kind, id){
+  if (!cloudLinked()) return; // sera retenté à la prochaine reconnexion
+  const list = kind === 'students' ? DB.students : DB.users;
+  const item = list && list.find(x => x.id === id);
+  if (!item || !item.photo || item.photo.indexOf('data:') !== 0) return;
+  uploadPhotoToStorage(kind, id, item.photo).then(url => {
+    if (!url) return;
+    const fresh = list.find(x => x.id === id);
+    if (fresh && fresh.photo && fresh.photo.indexOf('data:') === 0){
+      fresh.photo = url;
+      saveDB(); // l'affichage se met à jour tout seul au prochain rendu de la fiche/liste
+    }
+  });
+}
+/** Parcourt élèves + enseignants et envoie toutes les photos encore stockées en local. */
+function uploadAllPendingPhotos(){
+  if (!cloudLinked() || !DB) return;
+  (DB.students||[]).forEach(s => { if (s.photo && s.photo.indexOf('data:') === 0) queuePhotoUpload('students', s.id); });
+  (DB.users||[]).forEach(u => { if (u.photo && u.photo.indexOf('data:') === 0) queuePhotoUpload('users', u.id); });
+}
+
 function pickStudentPhoto(evt){
   const f = evt.target.files && evt.target.files[0];
   readPhotoFile(f, data => {
@@ -5738,6 +5796,7 @@ function pickEditPhoto(evt, id){
     if (!data) return;
     const s = DB.students.find(x=>x.id===id); if(!s) return;
     s.photo = data; saveDB();
+    queuePhotoUpload('students', id);
     const box = document.getElementById('edPhotoBox');
     if (box) box.innerHTML = `<img src="${data}" style="width:100%;height:100%;object-fit:cover">`;
     toast('Photo mise à jour.');
@@ -6075,7 +6134,7 @@ function pickTeacherPhoto(evt, userId){
     if (!data) return;
     if (userId){
       const u = DB.users.find(x=>x.id===userId);
-      if (u){ u.photo = data; saveDB(); toast('Photo mise à jour.'); }
+      if (u){ u.photo = data; saveDB(); queuePhotoUpload('users', userId); toast('Photo mise à jour.'); }
     } else {
       PENDING_TEACHER_PHOTO = data;
     }
