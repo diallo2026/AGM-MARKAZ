@@ -1532,6 +1532,8 @@ function renderDashboard(){
   const internat = activeStudents.filter(s=>s.category==='internat').length;
   const externat = activeStudents.filter(s=>s.category==='externat').length;
   const archived = students.filter(s=>s.status==='non_actif').length;
+  const payants = activeStudents.filter(s=>paymentStatusOf(s)==='payant').length;
+  const nonPayants = activeStudents.length - payants;
 
   const now = new Date();
   const y = now.getFullYear(), m = now.getMonth()+1;
@@ -1570,7 +1572,9 @@ function renderDashboard(){
     <div class="kpi"><div class="kl">Élèves actifs</div><div class="kv">${activeStudents.length}</div></div>
     <div class="kpi"><div class="kl">Internat</div><div class="kv">${internat}</div></div>
     <div class="kpi"><div class="kl">Externat</div><div class="kv">${externat}</div></div>
-    <div class="kpi"><div class="kl">Archivés</div><div class="kv">${archived}</div></div>`;
+    <div class="kpi"><div class="kl">Archivés</div><div class="kv">${archived}</div></div>
+    <div class="kpi green"><div class="kl">Élèves payants</div><div class="kv">${payants}</div></div>
+    <div class="kpi"><div class="kl">Élèves non payants (graciés)</div><div class="kv">${nonPayants}</div></div>`;
 
   if (canFinance){
     kpis += `
@@ -1605,6 +1609,16 @@ function renderDashboard(){
 }
 
 function categoryLabel(c){ return c==='internat' ? '🏠 Internat' : '🚶 Externat'; }
+
+/** Options d'années pour les sélecteurs de période — de (année courante - 2) jusqu'à 2040. */
+function yearRangeOptions(selectedYear){
+  const nowY = new Date().getFullYear();
+  const start = Math.min(nowY - 2, selectedYear || nowY);
+  const end = 2040;
+  const years = [];
+  for (let y = start; y <= end; y++) years.push(y);
+  return years.map(y=>`<option value="${y}" ${y===selectedYear?'selected':''}>${y}</option>`).join('');
+}
 
 /* =====================================================================
    ÉLÈVES
@@ -1681,6 +1695,8 @@ function renderStudents(){
       <td>${categoryLabel(s.category)}</td>
       <td>${tUser ? esc(tUser.first_name+' '+tUser.last_name) : '<span style="color:var(--muted)">—</span>'}</td>
       <td>${(s.memorized_juz||[]).length} / 30</td>
+      <td style="font-size:11.5px">${esc(studentPositionLabel(s))}</td>
+      <td style="cursor:${canEditRecords()?'pointer':'default'}" ${canEditRecords()?`onclick="toggleStudentPayStatus('${s.id}')" title="Cliquer pour changer le statut"`:''}>${paymentStatusBadgeStudent(s)}</td>
       <td style="text-align:right">
         <button class="fb fb-ghost fb-sm" onclick="viewStudent('${s.id}')">👁️ Voir</button>
         ${canEditRecords()?`<button class="fb fb-ghost fb-sm" onclick="openEditStudent('${s.id}')">✏️</button>`:''}
@@ -1691,8 +1707,11 @@ function renderStudents(){
     </tr>`;
   }).join('');
 
+  const payantCount = list.filter(s=>paymentStatusOf(s)==='payant').length;
+  const nonPayantCount = list.length - payantCount;
+
   document.getElementById('pageContent').innerHTML = `
-    ${pageHead('Élèves', list.length+' élève(s)', `<button class="fb fb-gold" onclick="openStudentForm()">+ Nouvel élève</button> `+printBtn('printStudentsList()'))}
+    ${pageHead('Élèves', list.length+' élève(s) — '+payantCount+' payant(s), '+nonPayantCount+' non payant(s)', `<button class="fb fb-gold" onclick="openStudentForm()">+ Nouvel élève</button> `+printBtn('printStudentsList()'))}
     ${filterBar('renderStudents()')}
     <div class="search-bar" style="gap:8px;flex-wrap:wrap">
       <input class="fi" placeholder="🔎 Rechercher un nom ou matricule…" value="${esc(studentSearch)}" oninput="studentSearch=this.value;renderStudents()">
@@ -1704,9 +1723,18 @@ function renderStudents(){
       </select>
     </div>
     <div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Matricule</th><th>Nom</th><th>Catégorie</th><th>Enseignant</th><th>Djouzou</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+      ${list.length ? `<table><thead><tr><th>Matricule</th><th>Nom</th><th>Catégorie</th><th>Enseignant</th><th>Djouzou</th><th>Position</th><th>Statut</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div class="empty-state"><div class="em">🎓</div>Aucun élève. Cliquez sur « Nouvel élève » pour commencer.</div>`}
     </div>`;
+}
+
+/** Libellé compact : djouzou en cours + sourate/verset où l'élève est actuellement rendu. */
+function studentPositionLabel(s){
+  ensureExt();
+  const p = getPlanning(s.id);
+  if (p.level==='hourouf') return 'Hourouf — lettre ' + ((p.hourouf_index||0)+1) + '/' + HOUROUF.length;
+  const sIdx = clampSourate(p.sourate);
+  return 'Djouzou ' + (s.current_juz||p.juz||1) + ' — ' + SOURATES[sIdx-1][0] + ' v.' + (p.ayah||1);
 }
 
 function teacherOptions(selected){
@@ -1733,9 +1761,10 @@ function openStudentForm(){
       <div class="fg"><label class="fl">Enseignant</label><select class="fi" id="stTeacher"><option value="">-- Aucun --</option>${teacherOptions()}</select></div>
     </div>
     <div class="fg2">
-      <div class="fg"><label class="fl">Nom du tuteur</label><input class="fi" id="stGuardian"></div>
+      <div class="fg"><label class="fl">Nom du tuteur</label><input class="fi" id="stGuardian" list="tutorsDatalist" oninput="autofillTutorPhone('stGuardian','stGuardianPhone')"></div>
       <div class="fg"><label class="fl">Téléphone tuteur</label><input class="fi" id="stGuardianPhone" placeholder="+224…"></div>
     </div>
+    <datalist id="tutorsDatalist">${tutorDatalistOptions()}</datalist>
     <div class="fg2">
       <div class="fg"><label class="fl">Date d'inscription</label><input class="fi" type="date" id="stEnroll" value="${todayStr()}"></div>
       <div class="fg"><label class="fl">Djouzou de départ</label><select class="fi" id="stStartJuz">${juzOrdered().map(j=>`<option value="${j.number}" ${j.number===firstJuz()?'selected':''}>Djouzou ${j.number} — ${esc(j.name_fr)}</option>`).join('')}</select></div>
@@ -1743,6 +1772,13 @@ function openStudentForm(){
     <div class="fg2">
       <div class="fg"><label class="fl">Frais d'inscription (GNF)</label><input class="fi" type="number" id="stFee" value="150000"></div>
       <div class="fg"><label class="fl">Mensualité (GNF)</label><input class="fi" type="number" id="stMonthly" value="40000"></div>
+    </div>
+    <div class="fg">
+      <label class="fl">Statut de paiement</label>
+      <select class="fi" id="stPayStatus">
+        <option value="payant">💰 Payant</option>
+        <option value="non_payant">🎁 Gracié — non payant</option>
+      </select>
     </div>
     <div class="fg">
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
@@ -1784,6 +1820,7 @@ function saveStudent(){
     enrollment_fee: Number(document.getElementById('stFee').value)||0,
     monthly_fee: Number(document.getElementById('stMonthly').value)||0,
     status: 'actif',
+    payment_status: (document.getElementById('stPayStatus')||{}).value || 'payant',
     current_juz: startJuz,
     memorized_juz: [],
     observations: '',
@@ -1798,8 +1835,8 @@ function saveStudent(){
   closeModal();
   toast('Élève inscrit : ' + student.matricule);
 
-  // Frais d'inscription : paiement enregistré + reçu généré automatiquement.
-  if (student.enrollment_fee > 0){
+  // Frais d'inscription : paiement enregistré + reçu généré automatiquement (élèves payants uniquement).
+  if (student.payment_status==='payant' && student.enrollment_fee > 0){
     const p = recordPayment({
       student_id: student.id,
       amount: student.enrollment_fee,
@@ -1839,6 +1876,8 @@ function viewStudent(id){
       <div><div class="fl">Téléphone</div>${esc(s.guardian_phone||'—')}</div>
       <div><div class="fl">Inscrit le</div>${s.enrollment_date||'—'}</div>
       <div><div class="fl">Djouzou mémorisés</div>${memorized.length} / 30</div>
+      <div><div class="fl">Statut de paiement</div>${paymentStatusBadgeStudent(s)}</div>
+      <div><div class="fl">Position actuelle (limite)</div>${esc(studentPositionLabel(s))}</div>
     </div>
 
     <div class="fl" style="margin-bottom:8px">Parcours des 30 djouzou (cliquer pour faire évoluer le statut)</div>
@@ -1971,7 +2010,7 @@ function renderEvaluations(){
         ${noEval.map(s=>`<button class="fb fb-gold fb-sm" onclick="openEvalForm('${s.id}')">+ ${esc(s.first_name+' '+s.last_name)}</button>`).join('')}
       </div></div>` : '';
 
-  const yearOpts = [evalPeriod.y-1,evalPeriod.y,evalPeriod.y+1].map(y=>`<option value="${y}" ${y===evalPeriod.y?'selected':''}>${y}</option>`).join('');
+  const yearOpts = yearRangeOptions(evalPeriod.y);
   const monthOpts = Array.from({length:12},(_,i)=>i+1).map(m=>`<option value="${m}" ${m===evalPeriod.m?'selected':''}>${monthLabel(m)}</option>`).join('');
 
   document.getElementById('pageContent').innerHTML = `
@@ -2156,8 +2195,8 @@ function renderPaiements(){
 }
 
 function openPaymentForm(){
-  const activeStudents = DB.students.filter(s=>s.status!=='non_actif');
-  if (!activeStudents.length){ toast('Inscrivez un élève avant de saisir un paiement.'); return; }
+  const activeStudents = DB.students.filter(s=>s.status!=='non_actif' && paymentStatusOf(s)==='payant');
+  if (!activeStudents.length){ toast("Aucun élève au statut « payant » à saisir (les élèves graciés n'apparaissent pas ici)."); return; }
   openModal(`
     <h3>Nouveau paiement élève</h3>
     <div class="fg"><label class="fl">Élève *</label>
@@ -3147,7 +3186,7 @@ function computeSalary(teacher, profit){
 function renderSalaries(){
   const u = currentUser();
   const profit = monthlyProfit(salaryPeriod.y, salaryPeriod.m);
-  const yearOpts = [salaryPeriod.y-1,salaryPeriod.y,salaryPeriod.y+1].map(y=>`<option value="${y}" ${y===salaryPeriod.y?'selected':''}>${y}</option>`).join('');
+  const yearOpts = yearRangeOptions(salaryPeriod.y);
   const monthOpts = Array.from({length:12},(_,i)=>i+1).map(m=>`<option value="${m}" ${m===salaryPeriod.m?'selected':''}>${monthLabel(m)}</option>`).join('');
 
   let bodyHtml;
@@ -3364,6 +3403,8 @@ function ensureExt(){
   if (!DB.perms) DB.perms = {};
   if (!Array.isArray(DB.hafizPlans)) DB.hafizPlans = [];
   if (!DB.calendarHistory) DB.calendarHistory = {};
+  if (typeof DB.courseDaysPerWeek !== 'number') DB.courseDaysPerWeek = 6;
+  if (typeof DB.recitDaysPerWeek !== 'number')  DB.recitDaysPerWeek = 1;
 }
 
 /* ---- Période globale de filtrage (mois / année) partagée par les onglets ---- */
@@ -3394,7 +3435,7 @@ function periodLabel(){
 /* ---- Barre de filtre réutilisable dans tous les onglets ---- */
 function filterBar(onChange){
   const cb = onChange || 'navigate(currentPage)';
-  const yOpts = [PERIOD.y-2,PERIOD.y-1,PERIOD.y,PERIOD.y+1].map(y=>`<option value="${y}" ${y===PERIOD.y?'selected':''}>${y}</option>`).join('');
+  const yOpts = yearRangeOptions(PERIOD.y);
   const mOpts = Array.from({length:12},(_,i)=>i+1).map(m=>`<option value="${m}" ${m===PERIOD.m?'selected':''}>${monthLabel(m)}</option>`).join('');
   return `<div class="search-bar" style="flex-wrap:wrap;gap:8px">
     <select class="fi" style="max-width:150px" onchange="PERIOD.mode=this.value;${cb}">
@@ -4030,10 +4071,65 @@ function renderRestitution(){
       ${rows?`<table><thead><tr><th>Élève</th><th>Portion enseignée</th><th>Date</th><th>Niveau</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       :`<div class="empty-state"><div class="em">🎙️</div>Aucune restitution en attente.</div>`}
     </div>
+    ${restitutionRollupHtml(me)}
     <div class="card" style="margin-top:16px"><b>Historique des restitutions</b></div>
     <div class="table-wrap">
       ${hist?`<table><thead><tr><th>Élève</th><th>Portion</th><th>Date</th><th>Résultat</th></tr></thead><tbody>${hist}</tbody></table>`
       :`<div class="empty-state"><div class="em">📜</div>Aucun historique sur la période.</div>`}
+    </div>`;
+}
+
+/** N° ISO de semaine (année-semaine) pour regrouper les restitutions par semaine. */
+function isoWeekKey(dateStr){
+  const d = new Date(dateStr+'T00:00:00');
+  if (isNaN(d)) return '—';
+  const t = new Date(d.getTime());
+  t.setHours(0,0,0,0);
+  t.setDate(t.getDate() + 3 - ((t.getDay()+6)%7)); // jeudi de la semaine ISO
+  const week1 = new Date(t.getFullYear(),0,4);
+  const weekNo = 1 + Math.round(((t-week1)/86400000 - 3 + ((week1.getDay()+6)%7))/7);
+  return t.getFullYear() + '-S' + String(weekNo).padStart(2,'0');
+}
+
+/**
+ * Restitution hebdomadaire ET mensuelle par élève : la restitution mensuelle d'un élève
+ * est la somme de ses restitutions hebdomadaires du mois — c'est cette agrégation qui
+ * sert de base au résultat de l'élève sur la période.
+ */
+function restitutionRollupHtml(me){
+  ensureExt();
+  const scoped = DB.recitations.filter(r=>!me || (DB.students.find(x=>x.id===r.student_id)||{}).teacher_id===me.id);
+  const byStudent = {};
+  scoped.forEach(r=>{
+    if (!byStudent[r.student_id]) byStudent[r.student_id] = [];
+    byStudent[r.student_id].push(r);
+  });
+  const curWeek = isoWeekKey(todayStr());
+  const curMonth = monthKey(todayStr());
+  const rows = Object.keys(byStudent).map(sid=>{
+    const s = DB.students.find(x=>x.id===sid)||{};
+    if (s.status==='non_actif') return '';
+    const list = byStudent[sid];
+    const weekList  = list.filter(r=>isoWeekKey(r.date)===curWeek);
+    const monthList = list.filter(r=>monthKey(r.date)===curMonth);
+    const wOk = weekList.filter(r=>r.ok).length, wKo = weekList.length - wOk;
+    const mOk = monthList.filter(r=>r.ok).length, mKo = monthList.length - mOk;
+    return `<tr>
+      <td>${esc((s.first_name||'')+' '+(s.last_name||''))}</td>
+      <td>${wOk} validée(s) · ${wKo} à reprendre <span style="color:var(--muted)">(${weekList.length} au total)</span></td>
+      <td>${mOk} validée(s) · ${mKo} à reprendre <span style="color:var(--muted)">(${monthList.length} au total)</span></td>
+    </tr>`;
+  }).join('');
+  return `
+    <div class="card" style="margin-top:16px">
+      <b>📅 Restitution hebdomadaire et mensuelle</b>
+      <p style="color:var(--muted);font-size:12px;margin:6px 0 12px">
+        La restitution mensuelle de chaque élève est l'ensemble de ses restitutions hebdomadaires du mois
+        — semaine en cours : ${esc(curWeek)}, mois en cours : ${esc(curMonth)}.</p>
+      <div class="table-wrap">
+        ${rows?`<table><thead><tr><th>Élève</th><th>Cette semaine</th><th>Ce mois-ci</th></tr></thead><tbody>${rows}</tbody></table>`
+        :`<div class="empty-state"><div class="em">📅</div>Aucune restitution enregistrée pour l'instant.</div>`}
+      </div>
     </div>`;
 }
 
@@ -5454,9 +5550,7 @@ function renderResults(){
   const rows = rankedResults(resultPeriod.y, resultPeriod.m);
   const mOpts = Array.from({length:12},(_,i)=>i+1)
     .map(m=>`<option value="${m}" ${m===resultPeriod.m?'selected':''}>${monthLabel(m)}</option>`).join('');
-  const yNow = new Date().getFullYear();
-  const yOpts = [yNow-2,yNow-1,yNow,yNow+1]
-    .map(y=>`<option value="${y}" ${y===resultPeriod.y?'selected':''}>${y}</option>`).join('');
+  const yOpts = yearRangeOptions(resultPeriod.y);
   const moy = rows.length ? (rows.reduce((a,r)=>a+r.ev.average,0)/rows.length) : 0;
 
   document.getElementById('pageContent').innerHTML = `
@@ -5848,12 +5942,20 @@ function openEditStudent(id){
         <option value="externat" ${s.category!=='internat'?'selected':''}>Externat</option></select></div>
     </div>
     <div class="fg2">
-      <div class="fg"><label class="fl">Tuteur</label><input class="fi" id="edGuardian" value="${esc(s.guardian_name||'')}"></div>
+      <div class="fg"><label class="fl">Tuteur</label><input class="fi" id="edGuardian" list="tutorsDatalist" value="${esc(s.guardian_name||'')}" oninput="autofillTutorPhone('edGuardian','edPhone')"></div>
       <div class="fg"><label class="fl">Téléphone tuteur</label><input class="fi" id="edPhone" value="${esc(s.guardian_phone||'')}"></div>
     </div>
+    <datalist id="tutorsDatalist">${tutorDatalistOptions()}</datalist>
     <div class="fg2">
       <div class="fg"><label class="fl">Frais d'inscription</label><input class="fi" type="number" id="edFee" value="${Number(s.enrollment_fee)||0}"></div>
       <div class="fg"><label class="fl">Mensualité</label><input class="fi" type="number" id="edMonthly" value="${Number(s.monthly_fee)||0}"></div>
+    </div>
+    <div class="fg">
+      <label class="fl">Statut de paiement</label>
+      <select class="fi" id="edPayStatus">
+        <option value="payant" ${(s.payment_status||'payant')==='payant'?'selected':''}>💰 Payant</option>
+        <option value="non_payant" ${s.payment_status==='non_payant'?'selected':''}>🎁 Gracié — non payant</option>
+      </select>
     </div>
     <div style="display:flex;gap:8px;margin-top:14px">
       <button class="fb fb-gold" style="flex:1" onclick="saveEditStudent('${s.id}')">💾 Enregistrer</button>
@@ -5873,8 +5975,46 @@ function saveEditStudent(id){
   s.guardian_phone = document.getElementById('edPhone').value.trim();
   s.enrollment_fee = Number(document.getElementById('edFee').value)||0;
   s.monthly_fee = Number(document.getElementById('edMonthly').value)||0;
+  s.payment_status = (document.getElementById('edPayStatus')||{}).value || 'payant';
   s.edited_at = Date.now();
   saveDB(); closeModal(); toast('Fiche modifiée.'); renderStudents();
+}
+
+/** Statut payant/non payant — élèves déjà présents dans la base (pas encore renseigné). */
+function paymentStatusOf(s){ return s.payment_status==='non_payant' ? 'non_payant' : 'payant'; }
+function paymentStatusBadgeStudent(s){
+  return paymentStatusOf(s)==='payant'
+    ? '<span class="badge badge-green">💰 Payant</span>'
+    : '<span class="badge badge-slate">🎁 Non payant</span>';
+}
+/** Bascule rapide du statut depuis la liste des élèves. */
+function toggleStudentPayStatus(id){
+  const s = DB.students.find(x=>x.id===id); if(!s) return;
+  s.payment_status = paymentStatusOf(s)==='payant' ? 'non_payant' : 'payant';
+  s.edited_at = Date.now();
+  saveDB();
+  toast('Statut mis à jour : ' + (s.payment_status==='payant'?'Payant':'Non payant'));
+  renderStudents();
+}
+
+/* ---- Mémorisation des tuteurs : suggestion automatique + auto-remplissage du téléphone ---- */
+function tutorDatalistOptions(){
+  const seen = new Set();
+  const opts = [];
+  (DB.students||[]).forEach(s=>{
+    const name = (s.guardian_name||'').trim();
+    if (name && !seen.has(name.toLowerCase())){ seen.add(name.toLowerCase()); opts.push(name); }
+  });
+  return opts.sort((a,b)=>a.localeCompare(b)).map(n=>`<option value="${esc(n)}">`).join('');
+}
+function autofillTutorPhone(nameFieldId, phoneFieldId){
+  const nameEl = document.getElementById(nameFieldId);
+  const phoneEl = document.getElementById(phoneFieldId);
+  if (!nameEl || !phoneEl) return;
+  const name = nameEl.value.trim().toLowerCase();
+  if (!name) return;
+  const match = (DB.students||[]).find(s=>(s.guardian_name||'').trim().toLowerCase()===name && s.guardian_phone);
+  if (match && !phoneEl.value) phoneEl.value = match.guardian_phone;
 }
 
 
@@ -6069,6 +6209,32 @@ function toggleRecitDay(d){
   const i = list.indexOf(d);
   if (i >= 0) list.splice(i,1); else list.push(d);
   saveDB(); renderSettings();
+}
+
+/** Réglage, par markaz, du nombre de jours de cours et de jours de restitution par semaine
+ *  (à titre indicatif / organisationnel — le blocage réel du jour continue de suivre les
+ *  jours cochés ci-dessus dans « Jours de restitution »). */
+function courseRestitutionCountHtml(){
+  ensureExt();
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <b>🗓️ Rythme hebdomadaire du markaz</b>
+      <p style="color:var(--muted);font-size:12.5px;margin:6px 0 12px">
+        Nombre de jours de cours et de jours de restitution par semaine pour ce markaz.</p>
+      <div class="fg2">
+        <div class="fg"><label class="fl">Jours de cours / semaine</label>
+          <input class="fi" type="number" min="1" max="7" id="courseDaysCountInput" value="${Number(DB.courseDaysPerWeek)||6}"></div>
+        <div class="fg"><label class="fl">Jours de restitution / semaine</label>
+          <input class="fi" type="number" min="0" max="7" id="recitDaysCountInput" value="${Number(DB.recitDaysPerWeek)||1}"></div>
+      </div>
+      <button class="fb fb-gold fb-sm" onclick="saveCourseRestitutionCount()">💾 Enregistrer</button>
+    </div>`;
+}
+function saveCourseRestitutionCount(){
+  ensureExt();
+  DB.courseDaysPerWeek = Math.max(1, Math.min(7, Number(document.getElementById('courseDaysCountInput').value)||6));
+  DB.recitDaysPerWeek  = Math.max(0, Math.min(7, Number(document.getElementById('recitDaysCountInput').value)||1));
+  saveDB(); toast('Rythme hebdomadaire enregistré.'); renderSettings();
 }
 /** Nom du jour (français) correspondant à une date. */
 function dayNameOf(dateStr){
@@ -6303,6 +6469,7 @@ function renderSettings(){
     ${calendarReviewHtml()}
     ${langBlockHtml()}
     ${recitDaysHtml()}
+    ${courseRestitutionCountHtml()}
     ${permsBlockHtml()}
     ${settingsExtraHtml()}
 
