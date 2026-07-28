@@ -1976,13 +1976,13 @@ function archiveStudent(id){
 /* =====================================================================
    POINTAGE — présence des élèves du markaz
    Deux méthodes de pointage par élève, indépendantes :
-   • Code PIN — fonctionne sur n'importe quel appareil (comparé par hash, jamais stocké en clair).
-   • Empreinte digitale / reconnaissance faciale — utilise la biométrie DÉJÀ configurée sur
-     l'appareil (WebAuthn / capteur natif du téléphone-tablette-ordinateur). Cette méthode est
-     liée à l'appareil sur lequel elle est enregistrée : parfaite si chaque élève pointe sur sa
-     propre tablette/téléphone ; sur un poste de pointage unique et partagé par tout le markaz,
-     préférez le code PIN (le capteur biométrique d'un appareil partagé ne peut pas, par nature,
-     distinguer plusieurs personnes différentes).
+   • Code PIN — comparé par hash, jamais stocké en clair.
+   • Empreinte / visage « image » — comme au guichet d'une banque : ce n'est PAS un
+     capteur qui lit le doigt de l'élève, c'est une IMAGE de référence (photo de
+     l'empreinte ou du visage) enregistrée une fois. Au pointage, cette image de
+     référence s'affiche et l'enseignant/l'agent confirme visuellement la
+     correspondance — ce mécanisme fonctionne sur n'importe quel appareil, sans
+     capteur biométrique spécial, contrairement à une vraie lecture d'empreinte.
    Un élève pointé est marqué « présent » du jour ; un élève non pointé à la clôture de la
    journée est marqué « absent » — ce qui alimente automatiquement sa progression et ses rapports.
    ===================================================================== */
@@ -1992,16 +1992,6 @@ async function hashPin(pin, salt){
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 function randSalt(){ return Math.random().toString(36).slice(2) + Date.now().toString(36); }
-function b64ToBuf(b64){
-  const bin = atob(b64); const buf = new Uint8Array(bin.length);
-  for (let i=0;i<bin.length;i++) buf[i] = bin.charCodeAt(i);
-  return buf.buffer;
-}
-function bufToB64(buf){
-  const bytes = new Uint8Array(buf); let bin='';
-  for (let i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
-}
 
 function renderPointage(){
   ensureExt();
@@ -2017,7 +2007,7 @@ function renderPointage(){
 
   const rows = students.map(s=>{
     const auth = DB.studentAuth[s.id]||{};
-    const methods = [auth.pinHash?'🔢 PIN':'', auth.webauthnCredId?'🖐️ Empreinte/Visage':'']
+    const methods = [auth.pinHash?'🔢 PIN':'', auth.bioImage?'🖐️ Empreinte/Visage (image)':'']
       .filter(Boolean).join(' · ') || '<span style="color:var(--muted)">Aucune méthode configurée</span>';
     let statusBadge = '<span class="badge badge-slate">Pas encore pointé</span>';
     if (presentIds.has(s.id)) statusBadge = '<span class="badge badge-green">✅ Présent</span>';
@@ -2035,7 +2025,7 @@ function renderPointage(){
     <div class="card" style="margin-bottom:16px;text-align:center;padding:28px 16px">
       <button class="fb fb-gold" style="font-size:20px;padding:20px 44px;border-radius:16px" onclick="openPointageKiosk()">📍 POINTAGE</button>
       <p style="color:var(--muted);font-size:12px;margin-top:12px">
-        Chaque élève pointe avec son empreinte/visage (biométrie de l'appareil) ou son code PIN.<br>
+        Chaque élève pointe avec son empreinte/visage (image de référence) ou son code PIN.<br>
         Un élève qui ne pointe pas est marqué absent à la clôture de la journée — cela impacte sa progression et son rapport.</p>
     </div>
     <div class="kpi-grid" style="margin-bottom:16px">
@@ -2074,24 +2064,31 @@ function openPointageKiosk(){
     </div>`);
 }
 
-async function pointageAuth(studentId){
+/** Choix de méthode : image de référence (confirmation visuelle) en priorité, sinon PIN. */
+function pointageAuth(studentId){
   ensureExt();
   const s = DB.students.find(x=>x.id===studentId); if(!s) return;
   const auth = DB.studentAuth[studentId] || {};
-  if (auth.webauthnCredId && window.PublicKeyCredential){
-    try {
-      const cred = await navigator.credentials.get({ publicKey:{
-        challenge: crypto.getRandomValues(new Uint8Array(32)),
-        allowCredentials: [{ id: b64ToBuf(auth.webauthnCredId), type:'public-key' }],
-        userVerification:'required', timeout:60000,
-      }});
-      if (cred){ markPointage(studentId,'biometrie'); return; }
-    } catch(e){
-      if (auth.pinHash) toast('Empreinte/visage non reconnu(e) — utilisez le code PIN.');
-    }
-  }
+  if (auth.bioImage){ openBioConfirm(studentId); return; }
   if (auth.pinHash){ openPinPrompt(studentId); return; }
   toast("⛔ Aucune méthode de pointage configurée pour "+(s.first_name+' '+s.last_name)+'. Configurez-la depuis la liste ci-dessous.');
+}
+
+/** Affiche l'image de référence (empreinte/visage) enregistrée pour confirmation visuelle. */
+function openBioConfirm(studentId){
+  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
+  const auth = DB.studentAuth[studentId]||{};
+  if (!auth.bioImage){ toast('Aucune image enregistrée.'); return; }
+  openModal(`
+    <h3 style="margin:0 0 4px">🖐️ Empreinte/Visage — ${esc(s.first_name+' '+s.last_name)}</h3>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">Comparez l'image de référence à l'élève présent, puis confirmez.</p>
+    <div style="text-align:center;margin-bottom:14px">
+      <img src="${auth.bioImage}" style="width:180px;height:180px;object-fit:cover;border-radius:14px;border:2px solid var(--line)">
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="fb fb-green" style="flex:1" onclick="markPointage('${studentId}','biometrie')">✅ Ça correspond — Présent</button>
+      <button class="fb fb-ghost" onclick="${auth.pinHash?`openPinPrompt('${studentId}')`:'openPointageKiosk()'}">${auth.pinHash?'🔢 Utiliser le PIN':'Annuler'}</button>
+    </div>`);
 }
 
 function openPinPrompt(studentId){
@@ -2147,19 +2144,16 @@ function closeDayAttendance(){
   renderPointage();
 }
 
-/** Enrôlement biométrique / PIN d'un élève (réservé au fondateur/administrateur). */
+/** Enrôlement PIN / image de référence d'un élève (réservé au fondateur/administrateur). */
 function openPointageEnroll(studentId){
   ensureExt();
   if (!canEditRecords()){ toast('⛔ Configuration réservée au fondateur/administrateur.'); return; }
   const s = DB.students.find(x=>x.id===studentId); if(!s) return;
   const auth = DB.studentAuth[studentId]||{};
-  const webauthnOk = !!(window.PublicKeyCredential);
   openModal(`
     <h3 style="margin:0 0 4px">🔐 Pointage — ${esc(s.first_name+' '+s.last_name)}</h3>
     <p style="color:var(--muted);font-size:11.5px;margin:0 0 14px">
-      Le code PIN fonctionne sur n'importe quel appareil. L'empreinte/visage utilise la biométrie
-      déjà configurée sur <b>cet appareil précis</b> — idéal si l'élève pointe toujours sur la même
-      tablette/téléphone ; sur un poste unique partagé par tout le markaz, préférez le PIN.</p>
+      Deux méthodes indépendantes, au choix.</p>
     <div class="card" style="margin-bottom:12px">
       <b>🔢 Code PIN</b>
       <p style="color:var(--muted);font-size:11.5px;margin:6px 0 10px">${auth.pinHash?'Un code est déjà défini.':'Aucun code défini.'}</p>
@@ -2170,12 +2164,22 @@ function openPointageEnroll(studentId){
       <button class="fb fb-gold fb-sm" onclick="saveStudentPin('${studentId}')">💾 Enregistrer le code</button>
     </div>
     <div class="card" style="margin-bottom:12px">
-      <b>🖐️ Empreinte digitale / Reconnaissance faciale</b>
+      <b>🖐️ Empreinte digitale / Visage — image de référence</b>
       <p style="color:var(--muted);font-size:11.5px;margin:6px 0 10px">
-        ${auth.webauthnCredId?'Une empreinte/un visage est déjà enregistré sur cet appareil.':'Rien d\'enregistré sur cet appareil.'}
-        ${webauthnOk?'':' Non disponible sur cet appareil/navigateur.'}</p>
-      <button class="fb fb-green fb-sm" ${webauthnOk?'':'disabled'} onclick="enrollWebauthn('${studentId}')">🖐️ Enregistrer sur cet appareil</button>
-      ${auth.webauthnCredId?`<button class="fb fb-danger fb-sm" onclick="removeWebauthn('${studentId}')">✖ Retirer</button>`:''}
+        Prenez une photo de l'empreinte (ex. posée sur du papier) ou du visage de l'élève, ou
+        importez une image — comme la photo de référence utilisée à un guichet de banque. Au
+        pointage, cette image s'affiche pour confirmation visuelle : aucun capteur spécial requis,
+        ça fonctionne sur n'importe quel appareil avec caméra ou galerie.</p>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+        <div id="bioImgBox" style="width:76px;height:76px;border-radius:12px;background:var(--panel2);
+          border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:26px;overflow:hidden">
+          ${auth.bioImage?`<img src="${auth.bioImage}" style="width:100%;height:100%;object-fit:cover">`:'🖐️'}</div>
+        <div style="flex:1">
+          <input type="file" accept="image/*" capture="environment" class="fi" onchange="pickBioImage(event,'${studentId}')">
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">Ouvre la caméra sur mobile, ou choisissez une image de la galerie.</div>
+        </div>
+      </div>
+      ${auth.bioImage?`<button class="fb fb-danger fb-sm" onclick="removeBioImage('${studentId}')">✖ Retirer l'image</button>`:''}
     </div>
     <div style="display:flex;gap:8px;margin-top:6px">
       <button class="fb fb-ghost" style="flex:1" onclick="closeModal()">Fermer</button>
@@ -2192,30 +2196,21 @@ async function saveStudentPin(studentId){
   DB.studentAuth[studentId] = Object.assign({}, DB.studentAuth[studentId]||{}, { pinHash:hash, pinSalt:salt });
   saveDB(); toast('Code PIN enregistré.'); openPointageEnroll(studentId);
 }
-async function enrollWebauthn(studentId){
+function pickBioImage(evt, studentId){
   ensureExt();
-  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
-  if (!window.PublicKeyCredential){ toast('Non disponible sur cet appareil.'); return; }
-  try {
-    const cred = await navigator.credentials.create({ publicKey:{
-      challenge: crypto.getRandomValues(new Uint8Array(32)),
-      rp: { name: DB.centerName || 'AGM' },
-      user: { id: new TextEncoder().encode(studentId), name: s.matricule||studentId, displayName: s.first_name+' '+s.last_name },
-      pubKeyCredParams: [{ type:'public-key', alg:-7 }, { type:'public-key', alg:-257 }],
-      authenticatorSelection: { authenticatorAttachment:'platform', userVerification:'required' },
-      timeout: 60000,
-    }});
-    if (!cred) return;
-    DB.studentAuth[studentId] = Object.assign({}, DB.studentAuth[studentId]||{}, { webauthnCredId: bufToB64(cred.rawId) });
-    saveDB(); toast('🖐️ Empreinte/visage enregistré sur cet appareil.'); openPointageEnroll(studentId);
-  } catch(e){
-    toast("Échec de l'enregistrement : "+(e && e.message ? e.message : 'annulé.'));
-  }
+  const f = evt.target.files && evt.target.files[0];
+  readPhotoFile(f, data => {
+    if (!data) return;
+    DB.studentAuth[studentId] = Object.assign({}, DB.studentAuth[studentId]||{}, { bioImage: data });
+    saveDB();
+    toast('🖐️ Image de référence enregistrée.');
+    openPointageEnroll(studentId);
+  });
 }
-function removeWebauthn(studentId){
+function removeBioImage(studentId){
   ensureExt();
-  if (DB.studentAuth[studentId]) delete DB.studentAuth[studentId].webauthnCredId;
-  saveDB(); toast('Empreinte/visage retirée.'); openPointageEnroll(studentId);
+  if (DB.studentAuth[studentId]) delete DB.studentAuth[studentId].bioImage;
+  saveDB(); toast('Image retirée.'); openPointageEnroll(studentId);
 }
 
 /* =====================================================================
