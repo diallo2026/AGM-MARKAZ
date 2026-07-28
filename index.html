@@ -2095,7 +2095,7 @@ function openPinPrompt(studentId){
   const s = DB.students.find(x=>x.id===studentId); if(!s) return;
   openModal(`
     <h3 style="margin:0 0 4px">🔢 Code PIN — ${esc(s.first_name+' '+s.last_name)}</h3>
-    <div class="fg"><input class="fi" type="password" inputmode="numeric" id="pinInput" placeholder="••••" autofocus></div>
+    <div class="fg"><input class="fi" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" style="-webkit-text-security:disc;text-security:disc" id="pinInput" placeholder="••••" autofocus></div>
     <div style="display:flex;gap:8px;margin-top:10px">
       <button class="fb fb-gold" style="flex:1" onclick="checkPinAndPoint('${studentId}')">✅ Valider</button>
       <button class="fb fb-ghost" onclick="openPointageKiosk()">Annuler</button>
@@ -2158,8 +2158,8 @@ function openPointageEnroll(studentId){
       <b>🔢 Code PIN</b>
       <p style="color:var(--muted);font-size:11.5px;margin:6px 0 10px">${auth.pinHash?'Un code est déjà défini.':'Aucun code défini.'}</p>
       <div class="fg2">
-        <div class="fg"><input class="fi" type="password" inputmode="numeric" id="newPin" placeholder="Nouveau code (4-6 chiffres)"></div>
-        <div class="fg"><input class="fi" type="password" inputmode="numeric" id="newPin2" placeholder="Confirmer"></div>
+        <div class="fg"><input class="fi" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" style="-webkit-text-security:disc;text-security:disc" id="newPin" placeholder="Nouveau code (4-6 chiffres)"></div>
+        <div class="fg"><input class="fi" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" style="-webkit-text-security:disc;text-security:disc" id="newPin2" placeholder="Confirmer"></div>
       </div>
       <button class="fb fb-gold fb-sm" onclick="saveStudentPin('${studentId}')">💾 Enregistrer le code</button>
     </div>
@@ -2418,6 +2418,40 @@ function monthYearLabel(ym){
   const y = Number(parts[0]), m = Number(parts[1]);
   if (!y || !m) return ym;
   return monthLabel(m) + ' ' + y;
+}
+
+/**
+ * RÉCONCILIATION DES RECETTES : reconstruit les transactions de type « Frais de
+ * scolarité » à partir des seuls paiements ENREGISTRÉS et VALIDÉS (status='approved').
+ * - Toute transaction déjà liée à un paiement (payment_id) qui n'existe plus, ou n'est
+ *   plus validé (rejeté/supprimé/en attente), est retirée des recettes.
+ * - Tout paiement validé qui n'a pas encore sa transaction est recréé.
+ * Les mouvements manuels (autres revenus, dépenses, sans payment_id) ne sont jamais
+ * touchés. Réservé au fondateur ; l'action est journalisée dans l'Historique.
+ */
+function reconcileRecettes(){
+  if (!isFondateur()){ toast('⛔ Réservé au fondateur.'); return; }
+  ensureExt();
+  if (!confirm("Reconstruire les recettes à partir des paiements enregistrés ? Tout montant qui ne correspond à aucun paiement validé sera retiré, et les paiements validés sans recette seront rajoutés.")) return;
+  const approvedIds = new Set(DB.payments.filter(p=>p.status==='approved').map(p=>p.id));
+  let removed = 0;
+  DB.transactions = DB.transactions.filter(t=>{
+    if (!t.payment_id) return true;              // mouvement manuel : jamais touché
+    const keep = approvedIds.has(t.payment_id);
+    if (!keep) removed++;
+    return keep;
+  });
+  const existingPaymentIds = new Set(DB.transactions.filter(t=>t.payment_id).map(t=>t.payment_id));
+  let added = 0;
+  DB.payments.filter(p=>p.status==='approved' && !existingPaymentIds.has(p.id)).forEach(p=>{
+    pushPaymentTransaction(p); added++;
+  });
+  saveDB();
+  logAction('Réconciliation des recettes', removed+' transaction(s) retirée(s) (sans paiement validé correspondant), '+added+' recette(s) manquante(s) rajoutée(s).');
+  toast('Recettes réconciliées : '+removed+' retirée(s), '+added+' ajoutée(s).');
+  if (currentPage==='dashboard') renderDashboard();
+  else if (currentPage==='finance') renderFinance();
+  else if (currentPage==='historique') renderHistorique();
 }
 
 /** Approbation par le fondateur : le montant entre en recette. */
@@ -3443,7 +3477,8 @@ function renderFinance(){
   </tr>`).join('');
 
   document.getElementById('pageContent').innerHTML = `
-    ${pageHead('Finances', 'Recettes et dépenses du centre', `<button class="fb fb-gold" onclick="openTxForm()">+ Mouvement</button> `+printBtn('printFinance()'))}
+    ${pageHead('Finances', 'Recettes et dépenses du centre', `<button class="fb fb-gold" onclick="openTxForm()">+ Mouvement</button> `+
+      (isFondateur()?`<button class="fb fb-ghost" onclick="reconcileRecettes()">🔄 Réconcilier les recettes</button> `:'')+printBtn('printFinance()'))}
     ${filterBar('renderFinance()')}
     <div class="kpi-grid">
       <div class="kpi green"><div class="kl">Recettes du mois</div><div class="kv">${fmtGNF(summary.income)}</div></div>
@@ -7083,6 +7118,18 @@ function renderSettings(){
       </p>
       ${accountsRows ? `<div class="table-wrap"><table><thead><tr><th>Nom</th><th>E-mail</th><th>Rôle</th><th>Statut</th><th></th></tr></thead><tbody>${accountsRows}</tbody></table></div>`
       : `<p style="color:var(--muted);font-size:13px">Aucun autre compte pour l'instant.</p>`}
+    </div>` : ''}
+
+    ${isFondateur() ? `
+    <div class="card" style="margin-bottom:16px">
+      <b>💰 Cohérence des recettes</b>
+      <p style="color:var(--muted);font-size:12.5px;margin:8px 0 14px">
+        Si le montant affiché en recettes ne correspond pas exactement aux paiements réellement
+        enregistrés (écarts accumulés, anciens mouvements orphelins), utilisez ce bouton pour
+        reconstruire les recettes strictement à partir des paiements validés. Les mouvements
+        manuels (autres revenus/dépenses) ne sont jamais touchés.
+      </p>
+      <button class="fb fb-danger fb-sm" onclick="reconcileRecettes()">🔄 Réconcilier les recettes</button>
     </div>` : ''}
 
     <div class="card" style="margin-bottom:16px">
