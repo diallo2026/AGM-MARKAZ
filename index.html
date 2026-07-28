@@ -2414,7 +2414,8 @@ function openPointageEnroll(studentId){
       <b>🪪 Photo de vérification (aide visuelle — PAS une biométrie)</b>
       <p style="color:var(--muted);font-size:11.5px;margin:6px 0 10px">
         Une photo de référence s'affichera au pointage pour qu'un adulte confirme visuellement
-        l'identité — ce n'est en aucun cas une reconnaissance automatique.</p>
+        l'identité — ce n'est en aucun cas une reconnaissance automatique. Elle est envoyée vers
+        un espace de stockage séparé (Firebase Storage), pas dans la base de données elle-même.</p>
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
         <div id="bioImgBox" style="width:76px;height:76px;border-radius:12px;background:var(--panel2);
           border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:26px;overflow:hidden">
@@ -2475,12 +2476,22 @@ function pickBioImage(evt, studentId){
     if (!data) return;
     DB.studentAuth[studentId] = Object.assign({}, DB.studentAuth[studentId]||{}, { bioImage: data });
     saveDB();
+    queueBioImageUpload(studentId);  // envoi vers Firebase Storage (hors de la base) dès que possible
     toast('🪪 Photo de vérification enregistrée.');
     openPointageEnroll(studentId);
   });
 }
+/** Supprime un fichier Firebase Storage à partir de son URL de téléchargement (best-effort). */
+function deleteStorageFileByUrl(url){
+  try {
+    if (!window.storageRef || !url || url.indexOf('http') !== 0) return;
+    window.storageRef.refFromURL(url).delete().catch(()=>{});
+  } catch(e){}
+}
 function removeBioImage(studentId){
   ensureExt();
+  const auth = DB.studentAuth[studentId];
+  if (auth && auth.bioImage && auth.bioImage.indexOf('http') === 0) deleteStorageFileByUrl(auth.bioImage);
   if (DB.studentAuth[studentId]) delete DB.studentAuth[studentId].bioImage;
   saveDB(); toast('Photo retirée.'); openPointageEnroll(studentId);
 }
@@ -6718,6 +6729,24 @@ function uploadAllPendingPhotos(){
   if (!cloudLinked() || !DB) return;
   (DB.students||[]).forEach(s => { if (s.photo && s.photo.indexOf('data:') === 0) queuePhotoUpload('students', s.id); });
   (DB.users||[]).forEach(u => { if (u.photo && u.photo.indexOf('data:') === 0) queuePhotoUpload('users', u.id); });
+  Object.keys(DB.studentAuth||{}).forEach(sid => queueBioImageUpload(sid));
+}
+
+/** Photo de vérification (pointage) : envoyée vers Firebase Storage (fichier séparé,
+ *  avec ses propres règles d'accès) au lieu d'être stockée en base64 dans la base de
+ *  données — évite qu'elle ne se retrouve embarquée dans un export/sauvegarde JSON. */
+function queueBioImageUpload(studentId){
+  if (!cloudLinked()) return; // sera retenté à la prochaine reconnexion ; le cache local reste utilisable entre-temps
+  const auth = DB.studentAuth && DB.studentAuth[studentId];
+  if (!auth || !auth.bioImage || auth.bioImage.indexOf('data:') !== 0) return;
+  uploadPhotoToStorage('bio', studentId, auth.bioImage).then(url => {
+    if (!url) return;
+    const fresh = DB.studentAuth && DB.studentAuth[studentId];
+    if (fresh && fresh.bioImage && fresh.bioImage.indexOf('data:') === 0){
+      fresh.bioImage = url;
+      saveDB();
+    }
+  });
 }
 
 function pickStudentPhoto(evt){
@@ -7284,12 +7313,14 @@ function deleteAllHistory(){
 function renderArchives(){
   const rows = DB.archives.filter(a=>!a.restored_at).map(a=>{
     const s = a.snapshot;
+    const hasAuth = !!DB.studentAuth[a.student_id];
     return `<tr>
       <td>${esc(s.first_name+' '+s.last_name)}</td>
       <td style="font-family:'DM Mono',monospace">${esc(s.matricule)}</td>
       <td>${new Date(a.archived_at).toLocaleDateString('fr-FR')}</td>
       <td style="text-align:right">
         <button class="fb fb-green fb-sm" onclick="restoreArchive('${a.id}')">↩️ Restaurer</button>
+        ${hasAuth?`<button class="fb fb-danger fb-sm" onclick="deleteBiometricData('${a.student_id}')" title="Supprime définitivement PIN, empreinte, visage et photo de vérification">🧬 Suppr. données biométriques</button>`:''}
         <button class="fb fb-danger fb-sm" onclick="deleteArchive('${a.id}')">🗑️</button>
       </td>
     </tr>`;
@@ -7301,6 +7332,27 @@ function renderArchives(){
       ${rows ? `<table><thead><tr><th>Élève</th><th>Matricule</th><th>Archivé le</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div class="empty-state"><div class="em">🗄️</div>Aucun élève archivé.</div>`}
     </div>`;
+}
+/** Supprime DÉFINITIVEMENT toutes les données biométriques (PIN, empreinte via lecteur,
+ *  visage, photo de vérification) d'un élève archivé — y compris le fichier sur Firebase
+ *  Storage et, si possible, le gabarit sur le lecteur d'empreintes. Action irréversible,
+ *  réservée au fondateur, journalisée dans l'Historique. */
+async function deleteBiometricData(studentId){
+  if (!isFondateur()){ toast('⛔ Réservé au fondateur.'); return; }
+  const auth = DB.studentAuth[studentId];
+  if (!auth){ toast('Aucune donnée biométrique pour cet élève.'); return; }
+  const snap = (DB.archives.find(a=>a.student_id===studentId)||{}).snapshot || {};
+  const name = (snap.first_name||'')+' '+(snap.last_name||'');
+  if (!confirm('Supprimer DÉFINITIVEMENT toutes les données biométriques de '+name.trim()+' (PIN, empreinte, visage, photo) ? Cette action est irréversible.')) return;
+  if (auth.bioImage && auth.bioImage.indexOf('http') === 0) deleteStorageFileByUrl(auth.bioImage);
+  if (auth.fpTemplateId && bioBridgeUrl()){
+    try { await bioBridgeCall('/enroll/'+encodeURIComponent(auth.fpTemplateId), { method:'DELETE' }); } catch(e){}
+  }
+  delete DB.studentAuth[studentId];
+  saveDB();
+  logAction('Suppression données biométriques', name.trim()+' — PIN/empreinte/visage/photo effacés définitivement.');
+  toast('Données biométriques supprimées définitivement.');
+  renderArchives();
 }
 function restoreArchive(id){
   const a = DB.archives.find(x=>x.id===id);
