@@ -1975,16 +1975,37 @@ function archiveStudent(id){
 
 /* =====================================================================
    POINTAGE — présence des élèves du markaz
-   Deux méthodes de pointage par élève, indépendantes :
-   • Code PIN — comparé par hash, jamais stocké en clair.
-   • Empreinte / visage « image » — comme au guichet d'une banque : ce n'est PAS un
-     capteur qui lit le doigt de l'élève, c'est une IMAGE de référence (photo de
-     l'empreinte ou du visage) enregistrée une fois. Au pointage, cette image de
-     référence s'affiche et l'enseignant/l'agent confirme visuellement la
-     correspondance — ce mécanisme fonctionne sur n'importe quel appareil, sans
-     capteur biométrique spécial, contrairement à une vraie lecture d'empreinte.
-   Un élève pointé est marqué « présent » du jour ; un élève non pointé à la clôture de la
-   journée est marqué « absent » — ce qui alimente automatiquement sa progression et ses rapports.
+   ---------------------------------------------------------------------
+   POURQUOI LE CAPTEUR DU TÉLÉPHONE NE PEUT PAS SERVIR À CELA (explication technique) :
+   Les API biométriques des smartphones (Android BiometricPrompt/FingerprintManager,
+   iOS Face ID/Touch ID, et leur équivalent web WebAuthn) sont conçues UNIQUEMENT pour
+   répondre à une question binaire : « la personne qui tient CET appareil est-elle bien
+   son propriétaire, tel qu'enrôlé dans les réglages du téléphone ? ». Le système
+   d'exploitation ne transmet JAMAIS l'empreinte ni un modèle biométrique à
+   l'application — il répond juste « oui/non » vis-à-vis du seul compte biométrique
+   du téléphone. Il est donc structurellement impossible, avec ces API, d'enrôler
+   puis reconnaître plusieurs centaines d'élèves différents sur un même appareil :
+   ce n'est pas un bug corrigible en JavaScript, c'est une limite de conception
+   volontaire (sécurité) d'Android/iOS. Aucune application web ou native grand public
+   ne peut contourner cela — seul un lecteur d'empreintes dédié (capteur externe avec
+   son propre firmware de capture/stockage de modèles) le permet. Voir plus bas.
+
+   MÉTHODES DE POINTAGE DISPONIBLES ICI (par élève, indépendantes) :
+   1) Code PIN — fonctionne partout, tout de suite, sans matériel. Comparé par hash,
+      jamais stocké en clair.
+   2) Empreinte digitale — via un LECTEUR EXTERNE DÉDIÉ (USB/Bluetooth/réseau) relié
+      à un petit programme « pont » (bridge) installé sur le poste de pointage. C'est
+      la seule solution techniquement correcte pour une vraie identification
+      biométrique multi-utilisateur (voir bloc BRIDGE plus bas et la réponse donnée
+      au fondateur pour le détail matériel/logiciel).
+   3) Photo de vérification — AIDE VISUELLE, PAS UNE BIOMÉTRIE : une photo de
+      référence (visage ou empreinte photographiée) s'affiche pour qu'un adulte
+      confirme visuellement qui est devant lui. Utile en secours, jamais présentée
+      comme une reconnaissance automatique.
+
+   Un élève pointé est marqué « présent » du jour ; un élève non pointé à la clôture
+   de la journée est marqué « absent » — ce qui alimente automatiquement sa
+   progression et ses rapports.
    ===================================================================== */
 async function hashPin(pin, salt){
   const enc = new TextEncoder().encode(String(salt||'') + ':' + String(pin||''));
@@ -1992,6 +2013,188 @@ async function hashPin(pin, salt){
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 function randSalt(){ return Math.random().toString(36).slice(2) + Date.now().toString(36); }
+
+/* ---------------------------------------------------------------------
+   PONT (BRIDGE) VERS UN LECTEUR D'EMPREINTES DÉDIÉ
+   L'application ne parle jamais directement au capteur (ce n'est pas possible
+   depuis un navigateur). Elle appelle une petite adresse locale (ex. un
+   programme installé sur le PC/tablette du poste de pointage, fourni avec le
+   lecteur ou écrit avec son SDK) qui, elle, pilote le vrai matériel et renvoie
+   un simple résultat JSON. Contrat attendu par CETTE application :
+     POST {bridge}/enroll    {student_id, name}         -> {ok:true, template_id}
+     POST {bridge}/identify  {}                          -> {ok:true, matched:true, template_id} | {ok:true, matched:false}
+     DELETE {bridge}/enroll/{template_id}                -> {ok:true}
+     GET  {bridge}/ping                                  -> {ok:true}
+   Le modèle biométrique (template) ne quitte jamais le lecteur/le pont : cette
+   appli ne stocke que l'identifiant opaque « template_id » renvoyé, jamais
+   d'image ni de gabarit brut.
+   ------------------------------------------------------------------- */
+function bioBridgeUrl(){ ensureExt(); return (DB.bioBridgeUrl||'').trim().replace(/\/$/,''); }
+async function bioBridgeCall(path, opts){
+  const base = bioBridgeUrl();
+  if (!base) throw new Error('no_bridge');
+  const ctrl = new AbortController();
+  const t = setTimeout(()=>ctrl.abort(), 6000);
+  try {
+    const res = await fetch(base+path, Object.assign({ signal: ctrl.signal }, opts||{}));
+    clearTimeout(t);
+    if (!res.ok) throw new Error('http_'+res.status);
+    return await res.json();
+  } catch(e){ clearTimeout(t); throw e; }
+}
+async function testBioBridge(){
+  ensureExt();
+  const urlEl = document.getElementById('bioBridgeUrlInput');
+  if (urlEl) DB.bioBridgeUrl = urlEl.value.trim();
+  saveDB();
+  const base = bioBridgeUrl();
+  if (!base){ toast('Renseignez d\'abord une adresse.'); return; }
+  try {
+    await bioBridgeCall('/ping', { method:'GET' });
+    toast('✅ Lecteur d\'empreintes détecté et joignable.');
+  } catch(e){
+    toast('❌ Aucune réponse du pont ('+base+'). Vérifiez que le programme du lecteur est démarré sur ce poste.');
+  }
+}
+
+/* ---------------------------------------------------------------------
+   RECONNAISSANCE FACIALE — celle-ci EST possible en multi-élèves, contrairement
+   au capteur d'empreinte du téléphone. Différence essentielle : elle n'appelle
+   PAS l'API Face ID/BiometricPrompt du système (réservée au seul propriétaire de
+   l'appareil) — elle utilise la CAMÉRA brute (comme pour une photo) et calcule
+   elle-même, dans le navigateur, une signature mathématique du visage (un vecteur
+   de 128 nombres, via un réseau de neurones open-source qui tourne localement,
+   sans rien envoyer sur internet). Cette signature est comparée à celles de tous
+   les élèves enregistrés pour trouver la meilleure correspondance.
+   Limites honnêtes à connaître :
+   • Nécessite une connexion internet la toute première fois (téléchargement des
+     modèles, quelques Mo) — ensuite le navigateur les garde en cache.
+   • La précision dépend de l'éclairage, de l'angle, de la qualité de la caméra ;
+     des jumeaux ou de très fortes ressemblances peuvent tromper le système.
+   • Sur d'anciens téléphones/tablettes, le calcul peut prendre 1-2 secondes.
+   • Les signatures sont des nombres, jamais l'image du visage : elles ne
+     permettent pas de reconstituer une photo, mais restent une donnée
+     biométrique sensible à protéger comme telle.
+   ------------------------------------------------------------------- */
+const FACE_MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js-models@master';
+const FACE_MATCH_THRESHOLD = 0.5; // plus petit = plus strict (0.5 est la valeur usuelle de la librairie)
+let _faceApiLoading = null;
+function ensureFaceApi(){
+  if (window.faceapi) return Promise.resolve(true);
+  if (_faceApiLoading) return _faceApiLoading;
+  _faceApiLoading = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js';
+    s.onload = async () => {
+      try {
+        await Promise.all([
+          faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODEL_URL),
+          faceapi.nets.faceLandmark68Net.loadFromUri(FACE_MODEL_URL),
+          faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODEL_URL),
+        ]);
+        resolve(true);
+      } catch(e){ reject(e); }
+    };
+    s.onerror = () => reject(new Error('script_load_failed'));
+    document.head.appendChild(s);
+  });
+  return _faceApiLoading;
+}
+async function startFaceCam(videoId, statusId){
+  const statusEl = document.getElementById(statusId);
+  try {
+    if (statusEl) statusEl.textContent = 'Activation de la caméra…';
+    const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'user' }, audio:false });
+    window._faceStream = stream;
+    const video = document.getElementById(videoId);
+    if (video){ video.srcObject = stream; await video.play().catch(()=>{}); }
+    if (statusEl) statusEl.textContent = 'Chargement du module de reconnaissance…';
+    await ensureFaceApi();
+    if (statusEl) statusEl.textContent = 'Prêt — cadrez le visage puis capturez.';
+  } catch(e){
+    if (statusEl) statusEl.textContent = "❌ Caméra ou module indisponible ("+(e&&e.message?e.message:'erreur')+").";
+  }
+}
+function stopFaceCam(){
+  if (window._faceStream){
+    window._faceStream.getTracks().forEach(t=>t.stop());
+    window._faceStream = null;
+  }
+}
+async function detectFaceDescriptor(videoId, statusId){
+  const statusEl = document.getElementById(statusId);
+  const video = document.getElementById(videoId);
+  if (!window.faceapi || !video) return null;
+  const result = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
+    .withFaceLandmarks().withFaceDescriptor();
+  if (!result){ if (statusEl) statusEl.textContent = '❌ Aucun visage détecté — réessayez.'; return null; }
+  return Array.from(result.descriptor);
+}
+
+function openFaceEnroll(studentId){
+  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
+  openModal(`
+    <h3 style="margin:0 0 4px">📷 Reconnaissance faciale — ${esc(s.first_name+' '+s.last_name)}</h3>
+    <p style="color:var(--muted);font-size:11.5px;margin:0 0 12px">Visage bien éclairé, de face, seul dans le cadre.</p>
+    <div style="text-align:center">
+      <video id="faceVideoEnroll" autoplay muted playsinline style="width:220px;height:220px;object-fit:cover;border-radius:14px;background:#000"></video>
+    </div>
+    <p id="faceStatusEnroll" style="text-align:center;color:var(--muted);font-size:11.5px;margin:8px 0">Initialisation…</p>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="fb fb-gold" style="flex:1" onclick="captureFaceEnroll('${studentId}')">📸 Capturer</button>
+      <button class="fb fb-ghost" onclick="stopFaceCam();openPointageEnroll('${studentId}')">Annuler</button>
+    </div>`);
+  startFaceCam('faceVideoEnroll','faceStatusEnroll');
+}
+async function captureFaceEnroll(studentId){
+  ensureExt();
+  const descriptor = await detectFaceDescriptor('faceVideoEnroll','faceStatusEnroll');
+  if (!descriptor) return;
+  DB.studentAuth[studentId] = Object.assign({}, DB.studentAuth[studentId]||{}, { faceDescriptor: descriptor });
+  saveDB();
+  stopFaceCam();
+  toast('📷 Visage enregistré.');
+  openPointageEnroll(studentId);
+}
+function removeFaceDescriptor(studentId){
+  ensureExt();
+  if (DB.studentAuth[studentId]) delete DB.studentAuth[studentId].faceDescriptor;
+  saveDB(); toast('Visage retiré.'); openPointageEnroll(studentId);
+}
+/** Identification 1:N réelle : compare le visage capturé à tous les élèves enregistrés. */
+function openFaceIdentify(){
+  openModal(`
+    <h3 style="margin:0 0 4px">📷 Identification par le visage</h3>
+    <p style="color:var(--muted);font-size:11.5px;margin:0 0 12px">Placez le visage de l'élève face à la caméra.</p>
+    <div style="text-align:center">
+      <video id="faceVideoId" autoplay muted playsinline style="width:220px;height:220px;object-fit:cover;border-radius:14px;background:#000"></video>
+    </div>
+    <p id="faceStatusId" style="text-align:center;color:var(--muted);font-size:11.5px;margin:8px 0">Initialisation…</p>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="fb fb-gold" style="flex:1" onclick="runFaceIdentify()">📸 Identifier</button>
+      <button class="fb fb-ghost" onclick="stopFaceCam();openPointageKiosk()">Fermer</button>
+    </div>`);
+  startFaceCam('faceVideoId','faceStatusId');
+}
+async function runFaceIdentify(){
+  ensureExt();
+  const statusEl = document.getElementById('faceStatusId');
+  const descriptor = await detectFaceDescriptor('faceVideoId','faceStatusId');
+  if (!descriptor) return;
+  let best = null, bestDist = Infinity;
+  Object.keys(DB.studentAuth).forEach(sid=>{
+    const fd = DB.studentAuth[sid].faceDescriptor;
+    if (!fd) return;
+    const dist = faceapi.euclideanDistance(descriptor, fd);
+    if (dist < bestDist){ bestDist = dist; best = sid; }
+  });
+  if (best && bestDist < FACE_MATCH_THRESHOLD){
+    stopFaceCam();
+    markPointage(best, 'visage');
+  } else {
+    if (statusEl) statusEl.textContent = '❌ Aucune correspondance suffisante ('+bestDist.toFixed(2)+') — réessayez ou utilisez une autre méthode.';
+  }
+}
 
 function renderPointage(){
   ensureExt();
@@ -2004,10 +2207,11 @@ function renderPointage(){
   const presentCount = students.filter(s=>presentIds.has(s.id)).length;
   const absentCount  = students.filter(s=>absentIds.has(s.id)).length;
   const pendingCount = students.length - presentCount - absentCount;
+  const hasBridge = !!bioBridgeUrl();
 
   const rows = students.map(s=>{
     const auth = DB.studentAuth[s.id]||{};
-    const methods = [auth.pinHash?'🔢 PIN':'', auth.bioImage?'🖐️ Empreinte/Visage (image)':'']
+    const methods = [auth.pinHash?'🔢 PIN':'', auth.fpTemplateId?'🖐️ Empreinte (lecteur)':'', auth.faceDescriptor?'📷 Visage (auto)':'', auth.bioImage?'🪪 Photo de vérification':'']
       .filter(Boolean).join(' · ') || '<span style="color:var(--muted)">Aucune méthode configurée</span>';
     let statusBadge = '<span class="badge badge-slate">Pas encore pointé</span>';
     if (presentIds.has(s.id)) statusBadge = '<span class="badge badge-green">✅ Présent</span>';
@@ -2025,8 +2229,9 @@ function renderPointage(){
     <div class="card" style="margin-bottom:16px;text-align:center;padding:28px 16px">
       <button class="fb fb-gold" style="font-size:20px;padding:20px 44px;border-radius:16px" onclick="openPointageKiosk()">📍 POINTAGE</button>
       <p style="color:var(--muted);font-size:12px;margin-top:12px">
-        Chaque élève pointe avec son empreinte/visage (image de référence) ou son code PIN.<br>
+        Chaque élève pointe avec son code PIN${hasBridge?', son empreinte (lecteur dédié)':''} ou une photo de vérification.<br>
         Un élève qui ne pointe pas est marqué absent à la clôture de la journée — cela impacte sa progression et son rapport.</p>
+      ${!hasBridge && isAdminOrAbove() ? `<p style="color:var(--gold-light);font-size:11.5px;margin-top:10px">Aucun lecteur d'empreintes relié — configurez-en un dans Réglages pour une vraie identification biométrique multi-élèves.</p>`:''}
     </div>
     <div class="kpi-grid" style="margin-bottom:16px">
       <div class="kpi green"><div class="kl">Présents</div><div class="kv">${presentCount}</div></div>
@@ -2055,7 +2260,9 @@ function openPointageKiosk(){
   }).join('');
   openModal(`
     <h3 style="margin:0 0 4px">📍 Pointage — ${esc(today)}</h3>
-    <p style="color:var(--muted);font-size:12px;margin:0 0 14px">Touchez la photo, puis confirmez avec l'empreinte/visage ou le code PIN.</p>
+    ${bioBridgeUrl() ? `<button class="fb fb-green" style="width:100%;margin-bottom:8px" onclick="identifyViaHardware()">🖐️ Identifier au lecteur d'empreintes</button>` : ''}
+    <button class="fb fb-green" style="width:100%;margin-bottom:10px" onclick="openFaceIdentify()">📷 Identifier par le visage</button>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 14px">${bioBridgeUrl()?'Ou touchez la photo d\'un élève pour PIN/photo de vérification.':'Touchez la photo d\'un élève, puis confirmez avec le PIN ou la photo de vérification.'}</p>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:10px;max-height:420px;overflow:auto">
       ${tiles || '<p style="color:var(--muted)">Aucun élève actif.</p>'}
     </div>
@@ -2064,29 +2271,44 @@ function openPointageKiosk(){
     </div>`);
 }
 
-/** Choix de méthode : image de référence (confirmation visuelle) en priorité, sinon PIN. */
+/** Identification 1:N réelle : le lecteur scanne un doigt et renvoie lui-même le template_id reconnu. */
+async function identifyViaHardware(){
+  if (!bioBridgeUrl()){ toast('Aucun lecteur configuré (Réglages).'); return; }
+  toast('Posez le doigt sur le lecteur…');
+  try {
+    const res = await bioBridgeCall('/identify', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}) });
+    if (!res || !res.matched){ toast('❌ Empreinte non reconnue.'); return; }
+    const entry = Object.entries(DB.studentAuth).find(([,a])=>a && a.fpTemplateId===res.template_id);
+    if (!entry){ toast('❌ Empreinte reconnue par le lecteur mais non liée à un élève ici.'); return; }
+    markPointage(entry[0], 'empreinte');
+  } catch(e){
+    toast('❌ Lecteur injoignable — vérifiez le pont dans Réglages.');
+  }
+}
+
+/** Choix de méthode côté élève (tuile touchée) : PIN ou photo de vérification. */
 function pointageAuth(studentId){
   ensureExt();
   const s = DB.students.find(x=>x.id===studentId); if(!s) return;
   const auth = DB.studentAuth[studentId] || {};
-  if (auth.bioImage){ openBioConfirm(studentId); return; }
   if (auth.pinHash){ openPinPrompt(studentId); return; }
+  if (auth.bioImage){ openBioConfirm(studentId); return; }
   toast("⛔ Aucune méthode de pointage configurée pour "+(s.first_name+' '+s.last_name)+'. Configurez-la depuis la liste ci-dessous.');
 }
 
-/** Affiche l'image de référence (empreinte/visage) enregistrée pour confirmation visuelle. */
+/** Affiche la photo de vérification (AIDE VISUELLE — pas une reconnaissance automatique). */
 function openBioConfirm(studentId){
   const s = DB.students.find(x=>x.id===studentId); if(!s) return;
   const auth = DB.studentAuth[studentId]||{};
-  if (!auth.bioImage){ toast('Aucune image enregistrée.'); return; }
+  if (!auth.bioImage){ toast('Aucune photo enregistrée.'); return; }
   openModal(`
-    <h3 style="margin:0 0 4px">🖐️ Empreinte/Visage — ${esc(s.first_name+' '+s.last_name)}</h3>
-    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">Comparez l'image de référence à l'élève présent, puis confirmez.</p>
+    <h3 style="margin:0 0 4px">🪪 Photo de vérification — ${esc(s.first_name+' '+s.last_name)}</h3>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">Ceci n'est pas une reconnaissance automatique : comparez la photo à l'élève présent, puis confirmez vous-même.</p>
     <div style="text-align:center;margin-bottom:14px">
       <img src="${auth.bioImage}" style="width:180px;height:180px;object-fit:cover;border-radius:14px;border:2px solid var(--line)">
     </div>
     <div style="display:flex;gap:8px">
-      <button class="fb fb-green" style="flex:1" onclick="markPointage('${studentId}','biometrie')">✅ Ça correspond — Présent</button>
+      <button class="fb fb-green" style="flex:1" onclick="markPointage('${studentId}','photo_verif')">✅ Ça correspond — Présent</button>
       <button class="fb fb-ghost" onclick="${auth.pinHash?`openPinPrompt('${studentId}')`:'openPointageKiosk()'}">${auth.pinHash?'🔢 Utiliser le PIN':'Annuler'}</button>
     </div>`);
 }
@@ -2119,8 +2341,9 @@ function markPointage(studentId, method){
   DB.attendance.push({ id:uid('at'), student_id:studentId, date:today, present:true, method, at:Date.now() });
   saveDB();
   const s = DB.students.find(x=>x.id===studentId);
-  toast('✅ '+(s?s.first_name+' '+s.last_name:'')+' pointé('+(method==='pin'?'e via PIN':'e via empreinte/visage')+').');
-  openPointageKiosk();
+  const methodLabel = method==='pin' ? 'via PIN' : method==='empreinte' ? "via empreinte (lecteur)" : method==='visage' ? 'via reconnaissance faciale' : 'via photo de vérification';
+  toast('✅ '+(s?s.first_name+' '+s.last_name:'')+' pointé '+methodLabel+'.');
+  if (document.getElementById('modalBg')) openPointageKiosk();
 }
 
 /** Clôture de la journée : tout élève non pointé est marqué absent — répercuté sur sa progression/rapport. */
@@ -2144,16 +2367,17 @@ function closeDayAttendance(){
   renderPointage();
 }
 
-/** Enrôlement PIN / image de référence d'un élève (réservé au fondateur/administrateur). */
+/** Enrôlement PIN / empreinte matérielle / photo de vérification (réservé fondateur/admin). */
 function openPointageEnroll(studentId){
   ensureExt();
   if (!canEditRecords()){ toast('⛔ Configuration réservée au fondateur/administrateur.'); return; }
   const s = DB.students.find(x=>x.id===studentId); if(!s) return;
   const auth = DB.studentAuth[studentId]||{};
+  const hasBridge = !!bioBridgeUrl();
   openModal(`
     <h3 style="margin:0 0 4px">🔐 Pointage — ${esc(s.first_name+' '+s.last_name)}</h3>
-    <p style="color:var(--muted);font-size:11.5px;margin:0 0 14px">
-      Deux méthodes indépendantes, au choix.</p>
+    <p style="color:var(--muted);font-size:11.5px;margin:0 0 14px">Trois méthodes indépendantes, au choix.</p>
+
     <div class="card" style="margin-bottom:12px">
       <b>🔢 Code PIN</b>
       <p style="color:var(--muted);font-size:11.5px;margin:6px 0 10px">${auth.pinHash?'Un code est déjà défini.':'Aucun code défini.'}</p>
@@ -2163,24 +2387,46 @@ function openPointageEnroll(studentId){
       </div>
       <button class="fb fb-gold fb-sm" onclick="saveStudentPin('${studentId}')">💾 Enregistrer le code</button>
     </div>
+
     <div class="card" style="margin-bottom:12px">
-      <b>🖐️ Empreinte digitale / Visage — image de référence</b>
+      <b>🖐️ Empreinte digitale — lecteur dédié</b>
       <p style="color:var(--muted);font-size:11.5px;margin:6px 0 10px">
-        Prenez une photo de l'empreinte (ex. posée sur du papier) ou du visage de l'élève, ou
-        importez une image — comme la photo de référence utilisée à un guichet de banque. Au
-        pointage, cette image s'affiche pour confirmation visuelle : aucun capteur spécial requis,
-        ça fonctionne sur n'importe quel appareil avec caméra ou galerie.</p>
+        ${hasBridge
+          ? (auth.fpTemplateId?'Une empreinte est déjà enregistrée sur le lecteur.':'Aucune empreinte enregistrée.')
+          : "Aucun lecteur configuré. Réglez l'adresse du pont dans Réglages → Lecteur d'empreintes."}</p>
+      <button class="fb fb-green fb-sm" ${hasBridge?'':'disabled'} onclick="enrollFingerprintHardware('${studentId}')">🖐️ Enregistrer au lecteur</button>
+      ${auth.fpTemplateId?`<button class="fb fb-danger fb-sm" onclick="removeFingerprintHardware('${studentId}')">✖ Retirer</button>`:''}
+    </div>
+
+    <div class="card" style="margin-bottom:12px">
+      <b>📷 Reconnaissance faciale automatique (calculée dans le navigateur)</b>
+      <p style="color:var(--muted);font-size:11.5px;margin:6px 0 10px">
+        ${auth.faceDescriptor?'Un visage est déjà enregistré.':'Aucun visage enregistré.'}
+        Contrairement au Face ID du téléphone, celle-ci reconnaît n'importe quel élève enregistré,
+        pas seulement le propriétaire de l'appareil — mais sa précision dépend de l'éclairage et
+        peut se tromper entre visages très ressemblants ; nécessite internet lors du tout premier
+        chargement (modèles téléchargés une seule fois).</p>
+      <button class="fb fb-green fb-sm" onclick="openFaceEnroll('${studentId}')">📷 Enregistrer le visage</button>
+      ${auth.faceDescriptor?`<button class="fb fb-danger fb-sm" onclick="removeFaceDescriptor('${studentId}')">✖ Retirer</button>`:''}
+    </div>
+
+    <div class="card" style="margin-bottom:12px">
+      <b>🪪 Photo de vérification (aide visuelle — PAS une biométrie)</b>
+      <p style="color:var(--muted);font-size:11.5px;margin:6px 0 10px">
+        Une photo de référence s'affichera au pointage pour qu'un adulte confirme visuellement
+        l'identité — ce n'est en aucun cas une reconnaissance automatique.</p>
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
         <div id="bioImgBox" style="width:76px;height:76px;border-radius:12px;background:var(--panel2);
           border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:26px;overflow:hidden">
-          ${auth.bioImage?`<img src="${auth.bioImage}" style="width:100%;height:100%;object-fit:cover">`:'🖐️'}</div>
+          ${auth.bioImage?`<img src="${auth.bioImage}" style="width:100%;height:100%;object-fit:cover">`:'🪪'}</div>
         <div style="flex:1">
           <input type="file" accept="image/*" capture="environment" class="fi" onchange="pickBioImage(event,'${studentId}')">
           <div style="font-size:11px;color:var(--muted);margin-top:4px">Ouvre la caméra sur mobile, ou choisissez une image de la galerie.</div>
         </div>
       </div>
-      ${auth.bioImage?`<button class="fb fb-danger fb-sm" onclick="removeBioImage('${studentId}')">✖ Retirer l'image</button>`:''}
+      ${auth.bioImage?`<button class="fb fb-danger fb-sm" onclick="removeBioImage('${studentId}')">✖ Retirer la photo</button>`:''}
     </div>
+
     <div style="display:flex;gap:8px;margin-top:6px">
       <button class="fb fb-ghost" style="flex:1" onclick="closeModal()">Fermer</button>
     </div>`);
@@ -2196,6 +2442,32 @@ async function saveStudentPin(studentId){
   DB.studentAuth[studentId] = Object.assign({}, DB.studentAuth[studentId]||{}, { pinHash:hash, pinSalt:salt });
   saveDB(); toast('Code PIN enregistré.'); openPointageEnroll(studentId);
 }
+/** Demande au pont/lecteur de capturer et enrôler une empreinte pour cet élève.
+ *  Le gabarit (template) reste géré par le lecteur : on ne stocke que l'ID opaque renvoyé. */
+async function enrollFingerprintHardware(studentId){
+  ensureExt();
+  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
+  if (!bioBridgeUrl()){ toast("Configurez d'abord le lecteur dans Réglages."); return; }
+  toast('Posez le doigt de l\'élève sur le lecteur…');
+  try {
+    const res = await bioBridgeCall('/enroll', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ student_id: studentId, name: s.first_name+' '+s.last_name }) });
+    if (!res || !res.ok || !res.template_id){ toast('Échec de l\'enrôlement — réessayez.'); return; }
+    DB.studentAuth[studentId] = Object.assign({}, DB.studentAuth[studentId]||{}, { fpTemplateId: res.template_id });
+    saveDB(); toast('🖐️ Empreinte enregistrée sur le lecteur.'); openPointageEnroll(studentId);
+  } catch(e){
+    toast('❌ Lecteur injoignable — vérifiez le pont dans Réglages.');
+  }
+}
+async function removeFingerprintHardware(studentId){
+  ensureExt();
+  const auth = DB.studentAuth[studentId]||{};
+  if (auth.fpTemplateId && bioBridgeUrl()){
+    try { await bioBridgeCall('/enroll/'+encodeURIComponent(auth.fpTemplateId), { method:'DELETE' }); } catch(e){}
+  }
+  if (DB.studentAuth[studentId]) delete DB.studentAuth[studentId].fpTemplateId;
+  saveDB(); toast('Empreinte retirée.'); openPointageEnroll(studentId);
+}
 function pickBioImage(evt, studentId){
   ensureExt();
   const f = evt.target.files && evt.target.files[0];
@@ -2203,14 +2475,14 @@ function pickBioImage(evt, studentId){
     if (!data) return;
     DB.studentAuth[studentId] = Object.assign({}, DB.studentAuth[studentId]||{}, { bioImage: data });
     saveDB();
-    toast('🖐️ Image de référence enregistrée.');
+    toast('🪪 Photo de vérification enregistrée.');
     openPointageEnroll(studentId);
   });
 }
 function removeBioImage(studentId){
   ensureExt();
   if (DB.studentAuth[studentId]) delete DB.studentAuth[studentId].bioImage;
-  saveDB(); toast('Image retirée.'); openPointageEnroll(studentId);
+  saveDB(); toast('Photo retirée.'); openPointageEnroll(studentId);
 }
 
 /* =====================================================================
@@ -3857,6 +4129,7 @@ function ensureExt(){
   if (!DB.dailyRange) DB.dailyRange = {};                   // portions (sourate/verset) choisies manuellement, par jour
   if (!Array.isArray(DB.historyLog))  DB.historyLog = [];   // journal des actions (suppressions, etc.)
   if (!DB.studentAuth) DB.studentAuth = {};                 // pointage : identifiants biométriques / PIN par élève
+  if (typeof DB.bioBridgeUrl !== 'string') DB.bioBridgeUrl = '';   // adresse du pont local vers un lecteur d'empreintes dédié
 }
 
 /* ---- Période globale de filtrage (mois / année) partagée par les onglets ---- */
@@ -7130,6 +7403,22 @@ function renderSettings(){
         manuels (autres revenus/dépenses) ne sont jamais touchés.
       </p>
       <button class="fb fb-danger fb-sm" onclick="reconcileRecettes()">🔄 Réconcilier les recettes</button>
+    </div>` : ''}
+
+    ${isFondateur() ? `
+    <div class="card" style="margin-bottom:16px">
+      <b>🖐️ Lecteur d'empreintes biométrique (matériel dédié)</b>
+      <p style="color:var(--muted);font-size:12.5px;margin:8px 0 12px">
+        Le capteur du téléphone ne peut identifier QUE son propriétaire (limite volontaire
+        d'Android/iOS) — il ne peut pas enrôler plusieurs élèves. Pour une vraie identification
+        biométrique multi-élèves, reliez un lecteur d'empreintes dédié (USB/Bluetooth/réseau) au
+        poste de pointage, via son petit programme-pont. Renseignez ici l'adresse locale de ce
+        pont (ex. http://127.0.0.1:8787).
+      </p>
+      <div class="fg2">
+        <div class="fg"><input class="fi" id="bioBridgeUrlInput" placeholder="http://127.0.0.1:8787" value="${esc(DB.bioBridgeUrl||'')}"></div>
+        <div class="fg" style="display:flex;align-items:flex-end"><button class="fb fb-gold fb-sm" onclick="testBioBridge()">🔌 Tester la connexion</button></div>
+      </div>
     </div>` : ''}
 
     <div class="card" style="margin-bottom:16px">
