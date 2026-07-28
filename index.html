@@ -698,6 +698,23 @@ function saveDB(){
   try { cloudSave(); } catch(e){}
 }
 
+/** Journal des actions (« Historique ») — enregistre les mouvements sensibles
+ *  (suppressions, approbations, etc.) pour traçabilité. Ne bloque jamais la
+ *  fonction appelante en cas d'échec. */
+function logAction(action, detail){
+  try {
+    if (!Array.isArray(DB.historyLog)) DB.historyLog = [];
+    const u = (typeof currentUser==='function' && currentUser()) || {};
+    DB.historyLog.push({
+      id: uid('hl'), at: Date.now(), date: todayStr(),
+      user: ((u.first_name||'')+' '+(u.last_name||'')).trim() || 'Système',
+      role: u.role || '', action, detail: detail || '',
+    });
+    // On garde un historique borné pour ne pas alourdir la base indéfiniment.
+    if (DB.historyLog.length > 2000) DB.historyLog = DB.historyLog.slice(-2000);
+  } catch(e){}
+}
+
 /* =====================================================================
    ███  MODULE CLOUD TEMPS RÉEL — Firebase Realtime Database
    Transposition fidèle de la méthode éprouvée de l'application de ventes
@@ -1380,6 +1397,7 @@ window.addEventListener('DOMContentLoaded', boot);
 const NAV_ITEMS = [
   { id:'dashboard',    label:'Tableau de bord', ic:'📊', roles:['fondateur','admin','enseignant','comptable'] },
   { id:'students',     label:'Élèves',          ic:'🎓', roles:['fondateur','admin','enseignant'] },
+  { id:'pointage',     label:'Pointage',        ic:'📍', roles:['fondateur','admin','enseignant'] },
   { id:'juz',          label:'Djouzou',         ic:'📖', roles:['fondateur','admin','enseignant'] },
   { id:'evaluations',  label:'Évaluations',     ic:'🏆', roles:['fondateur','admin','enseignant'] },
   { id:'paiements',    label:'Paiements',       ic:'🧾', roles:['fondateur','admin','comptable'] },
@@ -1396,6 +1414,7 @@ const NAV_ITEMS = [
   { id:'results',      label:'Résultats',       ic:'🏆', roles:['fondateur','admin','enseignant'] },
   { id:'hafiz',        label:'Hafiz',           ic:'🌟', roles:['fondateur','admin','enseignant'] },
   { id:'archives',     label:'Archives',        ic:'🗄️', roles:['fondateur'] },
+  { id:'historique',   label:'Historique',      ic:'🕓', roles:['fondateur','admin'] },
   { id:'settings',     label:'Réglages',        ic:'⚙️', roles:['fondateur','admin','enseignant','comptable'] },
 ];
 
@@ -1450,6 +1469,7 @@ function navigate(page){
   const renderers = {
     dashboard: renderDashboard,
     students: renderStudents,
+    pointage: renderPointage,
     juz: renderJuzGrid,
     evaluations: renderEvaluations,
     paiements: renderPaiements,
@@ -1460,6 +1480,7 @@ function navigate(page){
     teachers: renderTeachers,
     consumables: renderConsumables,
     archives: renderArchives,
+    historique: renderHistorique,
     planning: renderPlanning,
     lecture: renderLecture,
     restitution: renderRestitution,
@@ -1922,8 +1943,254 @@ function archiveStudent(id){
     snapshot: JSON.parse(JSON.stringify(s)),
   });
   saveDB();
+  logAction('Archivage élève', s.first_name+' '+s.last_name+' ('+s.matricule+')');
   toast('Élève archivé.');
   renderStudents();
+}
+
+/* =====================================================================
+   POINTAGE — présence des élèves du markaz
+   Deux méthodes de pointage par élève, indépendantes :
+   • Code PIN — fonctionne sur n'importe quel appareil (comparé par hash, jamais stocké en clair).
+   • Empreinte digitale / reconnaissance faciale — utilise la biométrie DÉJÀ configurée sur
+     l'appareil (WebAuthn / capteur natif du téléphone-tablette-ordinateur). Cette méthode est
+     liée à l'appareil sur lequel elle est enregistrée : parfaite si chaque élève pointe sur sa
+     propre tablette/téléphone ; sur un poste de pointage unique et partagé par tout le markaz,
+     préférez le code PIN (le capteur biométrique d'un appareil partagé ne peut pas, par nature,
+     distinguer plusieurs personnes différentes).
+   Un élève pointé est marqué « présent » du jour ; un élève non pointé à la clôture de la
+   journée est marqué « absent » — ce qui alimente automatiquement sa progression et ses rapports.
+   ===================================================================== */
+async function hashPin(pin, salt){
+  const enc = new TextEncoder().encode(String(salt||'') + ':' + String(pin||''));
+  const buf = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function randSalt(){ return Math.random().toString(36).slice(2) + Date.now().toString(36); }
+function b64ToBuf(b64){
+  const bin = atob(b64); const buf = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) buf[i] = bin.charCodeAt(i);
+  return buf.buffer;
+}
+function bufToB64(buf){
+  const bytes = new Uint8Array(buf); let bin='';
+  for (let i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function renderPointage(){
+  ensureExt();
+  const students = DB.students.filter(s=>s.status!=='non_actif')
+    .sort((a,b)=>(a.last_name||'').localeCompare(b.last_name||''));
+  const today = todayStr();
+  const attToday = DB.attendance.filter(a=>a.date===today);
+  const presentIds = new Set(attToday.filter(a=>a.present).map(a=>a.student_id));
+  const absentIds  = new Set(attToday.filter(a=>!a.present).map(a=>a.student_id));
+  const presentCount = students.filter(s=>presentIds.has(s.id)).length;
+  const absentCount  = students.filter(s=>absentIds.has(s.id)).length;
+  const pendingCount = students.length - presentCount - absentCount;
+
+  const rows = students.map(s=>{
+    const auth = DB.studentAuth[s.id]||{};
+    const methods = [auth.pinHash?'🔢 PIN':'', auth.webauthnCredId?'🖐️ Empreinte/Visage':'']
+      .filter(Boolean).join(' · ') || '<span style="color:var(--muted)">Aucune méthode configurée</span>';
+    let statusBadge = '<span class="badge badge-slate">Pas encore pointé</span>';
+    if (presentIds.has(s.id)) statusBadge = '<span class="badge badge-green">✅ Présent</span>';
+    else if (absentIds.has(s.id)) statusBadge = '<span class="badge badge-red">🚫 Absent</span>';
+    return `<tr>
+      <td><div style="display:flex;align-items:center;gap:9px">${photoThumb(s,30)}<span>${esc(s.first_name+' '+s.last_name)}</span></div></td>
+      <td style="font-size:11.5px">${methods}</td>
+      <td>${statusBadge}</td>
+      <td style="text-align:right">${canEditRecords()?`<button class="fb fb-ghost fb-sm" onclick="openPointageEnroll('${s.id}')">🔐 Configurer</button>`:''}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('pageContent').innerHTML = `
+    ${pageHead('Pointage', 'Présence des élèves du markaz — '+today)}
+    <div class="card" style="margin-bottom:16px;text-align:center;padding:28px 16px">
+      <button class="fb fb-gold" style="font-size:20px;padding:20px 44px;border-radius:16px" onclick="openPointageKiosk()">📍 POINTAGE</button>
+      <p style="color:var(--muted);font-size:12px;margin-top:12px">
+        Chaque élève pointe avec son empreinte/visage (biométrie de l'appareil) ou son code PIN.<br>
+        Un élève qui ne pointe pas est marqué absent à la clôture de la journée — cela impacte sa progression et son rapport.</p>
+    </div>
+    <div class="kpi-grid" style="margin-bottom:16px">
+      <div class="kpi green"><div class="kl">Présents</div><div class="kv">${presentCount}</div></div>
+      <div class="kpi red"><div class="kl">Absents</div><div class="kv">${absentCount}</div></div>
+      <div class="kpi"><div class="kl">Pas encore pointé</div><div class="kv">${pendingCount}</div></div>
+    </div>
+    ${isAdminOrAbove() ? `<div style="margin-bottom:16px"><button class="fb fb-danger fb-sm" onclick="closeDayAttendance()">🔒 Clôturer la journée (marquer absents les non-pointés)</button></div>` : ''}
+    <div class="table-wrap">
+      <table><thead><tr><th>Élève</th><th>Méthode(s) enregistrée(s)</th><th>Statut aujourd'hui</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    </div>`;
+}
+
+function openPointageKiosk(){
+  ensureExt();
+  const students = DB.students.filter(s=>s.status!=='non_actif')
+    .sort((a,b)=>(a.last_name||'').localeCompare(b.last_name||''));
+  const today = todayStr();
+  const presentIds = new Set(DB.attendance.filter(a=>a.date===today && a.present).map(a=>a.student_id));
+  const tiles = students.map(s=>{
+    const done = presentIds.has(s.id);
+    return `<div ${done?'':`onclick="pointageAuth('${s.id}')"`} style="cursor:${done?'default':'pointer'};text-align:center;padding:10px 6px;border-radius:12px;border:1px solid var(--line);background:${done?'rgba(21,128,61,.15)':'var(--panel2)'}">
+      ${photoThumb(s,50)}
+      <div style="font-size:11px;margin-top:6px">${esc(s.first_name+' '+s.last_name)}</div>
+      ${done?'<div style="font-size:10px;color:var(--ok)">✅ Pointé</div>':''}
+    </div>`;
+  }).join('');
+  openModal(`
+    <h3 style="margin:0 0 4px">📍 Pointage — ${esc(today)}</h3>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 14px">Touchez la photo, puis confirmez avec l'empreinte/visage ou le code PIN.</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:10px;max-height:420px;overflow:auto">
+      ${tiles || '<p style="color:var(--muted)">Aucun élève actif.</p>'}
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="fb fb-ghost" style="flex:1" onclick="closeModal()">Fermer</button>
+    </div>`);
+}
+
+async function pointageAuth(studentId){
+  ensureExt();
+  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
+  const auth = DB.studentAuth[studentId] || {};
+  if (auth.webauthnCredId && window.PublicKeyCredential){
+    try {
+      const cred = await navigator.credentials.get({ publicKey:{
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        allowCredentials: [{ id: b64ToBuf(auth.webauthnCredId), type:'public-key' }],
+        userVerification:'required', timeout:60000,
+      }});
+      if (cred){ markPointage(studentId,'biometrie'); return; }
+    } catch(e){
+      if (auth.pinHash) toast('Empreinte/visage non reconnu(e) — utilisez le code PIN.');
+    }
+  }
+  if (auth.pinHash){ openPinPrompt(studentId); return; }
+  toast("⛔ Aucune méthode de pointage configurée pour "+(s.first_name+' '+s.last_name)+'. Configurez-la depuis la liste ci-dessous.');
+}
+
+function openPinPrompt(studentId){
+  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
+  openModal(`
+    <h3 style="margin:0 0 4px">🔢 Code PIN — ${esc(s.first_name+' '+s.last_name)}</h3>
+    <div class="fg"><input class="fi" type="password" inputmode="numeric" id="pinInput" placeholder="••••" autofocus></div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="fb fb-gold" style="flex:1" onclick="checkPinAndPoint('${studentId}')">✅ Valider</button>
+      <button class="fb fb-ghost" onclick="openPointageKiosk()">Annuler</button>
+    </div>`);
+}
+async function checkPinAndPoint(studentId){
+  ensureExt();
+  const auth = DB.studentAuth[studentId]||{};
+  const pin = (document.getElementById('pinInput')||{}).value||'';
+  if (!pin){ toast('Entrez le code.'); return; }
+  const h = await hashPin(pin, auth.pinSalt||'');
+  if (h === auth.pinHash) markPointage(studentId,'pin');
+  else toast('❌ Code incorrect.');
+}
+
+/** Enregistre la présence du jour — un seul enregistrement par élève et par jour. */
+function markPointage(studentId, method){
+  ensureExt();
+  const today = todayStr();
+  DB.attendance = DB.attendance.filter(a=>!(a.student_id===studentId && a.date===today));
+  DB.attendance.push({ id:uid('at'), student_id:studentId, date:today, present:true, method, at:Date.now() });
+  saveDB();
+  const s = DB.students.find(x=>x.id===studentId);
+  toast('✅ '+(s?s.first_name+' '+s.last_name:'')+' pointé('+(method==='pin'?'e via PIN':'e via empreinte/visage')+').');
+  openPointageKiosk();
+}
+
+/** Clôture de la journée : tout élève non pointé est marqué absent — répercuté sur sa progression/rapport. */
+function closeDayAttendance(){
+  ensureExt();
+  if (!isAdminOrAbove()){ toast('⛔ Réservé au fondateur/administrateur.'); return; }
+  if (!confirm('Clôturer la journée : tout élève non pointé sera marqué absent. Continuer ?')) return;
+  const today = todayStr();
+  const students = DB.students.filter(s=>s.status!=='non_actif');
+  const already = new Set(DB.attendance.filter(a=>a.date===today).map(a=>a.student_id));
+  let n = 0;
+  students.forEach(s=>{
+    if (!already.has(s.id)){
+      DB.attendance.push({ id:uid('at'), student_id:s.id, date:today, present:false, cause:'Non pointé (clôture de journée)' });
+      n++;
+    }
+  });
+  saveDB();
+  logAction('Clôture de journée (Pointage)', n+" élève(s) marqué(s) absent(s) faute de pointage — "+today);
+  toast(n+' élève(s) marqué(s) absent(s).');
+  renderPointage();
+}
+
+/** Enrôlement biométrique / PIN d'un élève (réservé au fondateur/administrateur). */
+function openPointageEnroll(studentId){
+  ensureExt();
+  if (!canEditRecords()){ toast('⛔ Configuration réservée au fondateur/administrateur.'); return; }
+  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
+  const auth = DB.studentAuth[studentId]||{};
+  const webauthnOk = !!(window.PublicKeyCredential);
+  openModal(`
+    <h3 style="margin:0 0 4px">🔐 Pointage — ${esc(s.first_name+' '+s.last_name)}</h3>
+    <p style="color:var(--muted);font-size:11.5px;margin:0 0 14px">
+      Le code PIN fonctionne sur n'importe quel appareil. L'empreinte/visage utilise la biométrie
+      déjà configurée sur <b>cet appareil précis</b> — idéal si l'élève pointe toujours sur la même
+      tablette/téléphone ; sur un poste unique partagé par tout le markaz, préférez le PIN.</p>
+    <div class="card" style="margin-bottom:12px">
+      <b>🔢 Code PIN</b>
+      <p style="color:var(--muted);font-size:11.5px;margin:6px 0 10px">${auth.pinHash?'Un code est déjà défini.':'Aucun code défini.'}</p>
+      <div class="fg2">
+        <div class="fg"><input class="fi" type="password" inputmode="numeric" id="newPin" placeholder="Nouveau code (4-6 chiffres)"></div>
+        <div class="fg"><input class="fi" type="password" inputmode="numeric" id="newPin2" placeholder="Confirmer"></div>
+      </div>
+      <button class="fb fb-gold fb-sm" onclick="saveStudentPin('${studentId}')">💾 Enregistrer le code</button>
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <b>🖐️ Empreinte digitale / Reconnaissance faciale</b>
+      <p style="color:var(--muted);font-size:11.5px;margin:6px 0 10px">
+        ${auth.webauthnCredId?'Une empreinte/un visage est déjà enregistré sur cet appareil.':'Rien d\'enregistré sur cet appareil.'}
+        ${webauthnOk?'':' Non disponible sur cet appareil/navigateur.'}</p>
+      <button class="fb fb-green fb-sm" ${webauthnOk?'':'disabled'} onclick="enrollWebauthn('${studentId}')">🖐️ Enregistrer sur cet appareil</button>
+      ${auth.webauthnCredId?`<button class="fb fb-danger fb-sm" onclick="removeWebauthn('${studentId}')">✖ Retirer</button>`:''}
+    </div>
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <button class="fb fb-ghost" style="flex:1" onclick="closeModal()">Fermer</button>
+    </div>`);
+}
+async function saveStudentPin(studentId){
+  ensureExt();
+  const p1 = (document.getElementById('newPin').value||'').trim();
+  const p2 = (document.getElementById('newPin2').value||'').trim();
+  if (!/^\d{4,6}$/.test(p1)){ toast('Le code doit contenir 4 à 6 chiffres.'); return; }
+  if (p1!==p2){ toast('Les deux codes ne correspondent pas.'); return; }
+  const salt = randSalt();
+  const hash = await hashPin(p1, salt);
+  DB.studentAuth[studentId] = Object.assign({}, DB.studentAuth[studentId]||{}, { pinHash:hash, pinSalt:salt });
+  saveDB(); toast('Code PIN enregistré.'); openPointageEnroll(studentId);
+}
+async function enrollWebauthn(studentId){
+  ensureExt();
+  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
+  if (!window.PublicKeyCredential){ toast('Non disponible sur cet appareil.'); return; }
+  try {
+    const cred = await navigator.credentials.create({ publicKey:{
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rp: { name: DB.centerName || 'AGM' },
+      user: { id: new TextEncoder().encode(studentId), name: s.matricule||studentId, displayName: s.first_name+' '+s.last_name },
+      pubKeyCredParams: [{ type:'public-key', alg:-7 }, { type:'public-key', alg:-257 }],
+      authenticatorSelection: { authenticatorAttachment:'platform', userVerification:'required' },
+      timeout: 60000,
+    }});
+    if (!cred) return;
+    DB.studentAuth[studentId] = Object.assign({}, DB.studentAuth[studentId]||{}, { webauthnCredId: bufToB64(cred.rawId) });
+    saveDB(); toast('🖐️ Empreinte/visage enregistré sur cet appareil.'); openPointageEnroll(studentId);
+  } catch(e){
+    toast("Échec de l'enregistrement : "+(e && e.message ? e.message : 'annulé.'));
+  }
+}
+function removeWebauthn(studentId){
+  ensureExt();
+  if (DB.studentAuth[studentId]) delete DB.studentAuth[studentId].webauthnCredId;
+  saveDB(); toast('Empreinte/visage retirée.'); openPointageEnroll(studentId);
 }
 
 /* =====================================================================
@@ -2104,6 +2371,7 @@ function recordPayment(data){
     student_id: data.student_id, amount: Number(data.amount),
     label: data.label || 'Frais de scolarité',
     date: data.date || todayStr(),
+    for_month: data.for_month || null,   // mois de scolarité concerné (YYYY-MM), pour le suivi des dettes
     recorded_by: u.id, recorded_by_name: u.first_name+' '+u.last_name, recorded_role: u.role,
     status: autoApproved ? 'approved' : 'pending',
     approved_by: autoApproved ? u.id : null,
@@ -2120,8 +2388,16 @@ function pushPaymentTransaction(p){
   DB.transactions.push({
     id: uid('tx'), type:'income', category:'Frais de scolarité',
     amount: p.amount, date: p.date, payment_id: p.id,
-    description: p.label + ' — ' + (s ? s.first_name+' '+s.last_name+' ('+s.matricule+')' : ''),
+    description: p.label + (p.for_month?' ('+monthYearLabel(p.for_month)+')':'') + ' — ' + (s ? s.first_name+' '+s.last_name+' ('+s.matricule+')' : ''),
   });
+}
+/** Libellé lisible d'un mois « YYYY-MM » -> « Février 2026 ». */
+function monthYearLabel(ym){
+  if (!ym) return '';
+  const parts = String(ym).split('-');
+  const y = Number(parts[0]), m = Number(parts[1]);
+  if (!y || !m) return ym;
+  return monthLabel(m) + ' ' + y;
 }
 
 /** Approbation par le fondateur : le montant entre en recette. */
@@ -2134,6 +2410,8 @@ function approvePayment(paymentId){
   p.approved_at = Date.now();
   pushPaymentTransaction(p);
   saveDB();
+  const s = DB.students.find(x=>x.id===p.student_id);
+  logAction('Approbation de paiement', (s?(s.first_name+' '+s.last_name):'—') + ' — ' + fmtGNF(p.amount));
   toast('Paiement approuvé — ' + fmtGNF(p.amount) + ' ajouté aux recettes.');
   if (currentPage==='dashboard') renderDashboard(); else renderPaiements();
 }
@@ -2145,6 +2423,8 @@ function rejectPayment(paymentId){
   if (!confirm('Rejeter ce paiement ?')) return;
   p.status = 'rejected';
   saveDB();
+  const s = DB.students.find(x=>x.id===p.student_id);
+  logAction('Rejet de paiement', (s?(s.first_name+' '+s.last_name):'—') + ' — ' + fmtGNF(p.amount));
   toast('Paiement rejeté.');
   if (currentPage==='dashboard') renderDashboard(); else renderPaiements();
 }
@@ -2172,6 +2452,7 @@ function renderPaiements(){
       <td style="font-family:'DM Mono',monospace;color:var(--gold-light)">${esc(p.receipt_no)}</td>
       <td>${s?esc(s.first_name+' '+s.last_name):'—'}</td>
       <td>${esc(p.label)}</td>
+      <td>${p.for_month?esc(monthYearLabel(p.for_month)):'<span style="color:var(--muted)">—</span>'}</td>
       <td>${p.date}</td>
       <td style="font-weight:700">${fmtGNF(p.amount)}</td>
       <td>${paymentStatusBadge(p)}</td>
@@ -2186,30 +2467,53 @@ function renderPaiements(){
 
   document.getElementById('pageContent').innerHTML = `
     ${pageHead('Paiements élèves', (isFondateur()&&pendingCount ? pendingCount+' paiement(s) en attente de votre approbation' : 'Scolarité, inscriptions et autres paiements'),
-      `<button class="fb fb-gold" onclick="openPaymentForm()">+ Nouveau paiement</button> `+printBtn('printPaiementsList()'))}
+      `<button class="fb fb-gold" onclick="openPaymentForm()">+ Nouveau paiement</button> `+
+      `<button class="fb fb-ghost" onclick="openDettesModal()">📋 Dettes de scolarité</button> `+printBtn('printPaiementsList()'))}
     ${filterBar('renderPaiements()')}
     <div class="table-wrap">
-      ${rows ? `<table><thead><tr><th>Reçu</th><th>Élève</th><th>Motif</th><th>Date</th><th>Montant</th><th>Statut</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+      ${rows ? `<table><thead><tr><th>Reçu</th><th>Élève</th><th>Motif</th><th>Mois concerné</th><th>Date</th><th>Montant</th><th>Statut</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div class="empty-state"><div class="em">🧾</div>Aucun paiement enregistré.</div>`}
     </div>`;
 }
 
-function openPaymentForm(){
+function currentMonthYM(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+
+/** monthSelectOptions(selectedYM) — sélecteur Mois/Année (jusqu'en 2040) pour la scolarité concernée. */
+function monthSelectOptions(selectedYM){
+  const [sy, sm] = (selectedYM||currentMonthYM()).split('-').map(Number);
+  const nowY = new Date().getFullYear();
+  const startY = Math.min(nowY-1, sy||nowY);
+  let opts = '';
+  for (let y=startY; y<=2040; y++){
+    for (let m=1; m<=12; m++){
+      const ym = y+'-'+String(m).padStart(2,'0');
+      opts += `<option value="${ym}" ${ym===selectedYM?'selected':''}>${monthLabel(m)} ${y}</option>`;
+    }
+  }
+  return opts;
+}
+
+function openPaymentForm(presetStudentId, presetMonth, presetAmount){
   const activeStudents = DB.students.filter(s=>s.status!=='non_actif' && paymentStatusOf(s)==='payant');
   if (!activeStudents.length){ toast("Aucun élève au statut « payant » à saisir (les élèves graciés n'apparaissent pas ici)."); return; }
+  const ym = presetMonth || currentMonthYM();
   openModal(`
-    <h3>Nouveau paiement élève</h3>
+    <h3>${presetMonth?'Versement — frais de scolarité':'Nouveau paiement élève'}</h3>
     <div class="fg"><label class="fl">Élève *</label>
-      <select class="fi" id="payStudent">${activeStudents.map(s=>`<option value="${s.id}">${esc(s.first_name+' '+s.last_name)} — ${esc(s.matricule)}</option>`).join('')}</select>
+      <select class="fi" id="payStudent">${activeStudents.map(s=>`<option value="${s.id}" ${s.id===presetStudentId?'selected':''}>${esc(s.first_name+' '+s.last_name)} — ${esc(s.matricule)}</option>`).join('')}</select>
     </div>
     <div class="fg"><label class="fl">Motif</label>
-      <select class="fi" id="payLabel">
-        <option>Frais de scolarité</option><option>Frais d'inscription</option>
+      <select class="fi" id="payLabel" onchange="toggleMonthField()">
+        <option selected>Frais de scolarité</option><option>Frais d'inscription</option>
         <option>Internat</option><option>Autre paiement</option>
       </select>
     </div>
+    <div class="fg" id="payMonthWrap" style="display:block">
+      <label class="fl">Mois de scolarité concerné</label>
+      <select class="fi" id="payMonth">${monthSelectOptions(ym)}</select>
+    </div>
     <div class="fg2">
-      <div class="fg"><label class="fl">Montant (GNF) *</label><input class="fi" type="number" id="payAmount" placeholder="0"></div>
+      <div class="fg"><label class="fl">Montant (GNF) *</label><input class="fi" type="number" id="payAmount" placeholder="0" value="${presetAmount||''}"></div>
       <div class="fg"><label class="fl">Date</label><input class="fi" type="date" id="payDate" value="${todayStr()}"></div>
     </div>
     ${isComptable() ? '<p style="color:var(--muted);font-size:11.5px;margin-bottom:10px">Votre saisie apparaît immédiatement dans votre tableau, puis attend l’approbation du fondateur avant d’entrer dans les recettes.</p>' : ''}
@@ -2218,20 +2522,109 @@ function openPaymentForm(){
       <button class="fb fb-ghost" onclick="closeModal()">Annuler</button>
     </div>`);
 }
+/** Affiche le sélecteur de mois uniquement quand le motif est « Frais de scolarité ». */
+function toggleMonthField(){
+  const lbl = (document.getElementById('payLabel')||{}).value;
+  const wrap = document.getElementById('payMonthWrap');
+  if (wrap) wrap.style.display = (lbl==='Frais de scolarité') ? 'block' : 'none';
+}
 
 function savePaymentForm(){
   const amount = Number(document.getElementById('payAmount').value);
   if (!amount || amount<=0){ toast('Montant invalide.'); return; }
+  const label = document.getElementById('payLabel').value;
+  const monthEl = document.getElementById('payMonth');
   const p = recordPayment({
     student_id: document.getElementById('payStudent').value,
     amount,
-    label: document.getElementById('payLabel').value,
+    label,
     date: document.getElementById('payDate').value,
+    for_month: (label==='Frais de scolarité' && monthEl) ? monthEl.value : null,
   });
   closeModal();
   toast(p.status==='approved' ? 'Paiement validé — reçu généré.' : 'Paiement enregistré — en attente d’approbation.');
   printReceipt(p.id);
   renderPaiements();
+}
+
+/* =====================================================================
+   DETTES DE SCOLARITÉ — suivi mois par mois pour chaque élève « payant »
+   ===================================================================== */
+/** Ledger mensuel d'un élève payant : mois de son inscription jusqu'au mois courant. */
+function studentDebtLedger(studentId){
+  ensureExt();
+  const s = DB.students.find(x=>x.id===studentId);
+  if (!s) return [];
+  const fee = Number(s.monthly_fee)||0;
+  const enroll = s.enrollment_date ? new Date(s.enrollment_date) : new Date();
+  let y = enroll.getFullYear(), m = enroll.getMonth()+1;
+  const now = new Date(); const endY = now.getFullYear(), endM = now.getMonth()+1;
+  const paidByMonth = {};
+  DB.payments.filter(p=>p.student_id===studentId && p.label==='Frais de scolarité' && p.for_month && p.status!=='rejected')
+    .forEach(p=>{ paidByMonth[p.for_month] = (paidByMonth[p.for_month]||0) + Number(p.amount||0); });
+  const months = [];
+  // Sécurité : borne à 60 mois pour éviter une boucle démesurée sur une très ancienne inscription.
+  let guard = 0;
+  while ((y < endY || (y===endY && m<=endM)) && guard < 60){
+    const ym = y+'-'+String(m).padStart(2,'0');
+    const paid = paidByMonth[ym]||0;
+    const status = fee<=0 ? 'n/a' : (paid>=fee ? 'payé' : (paid>0 ? 'partiel' : 'impayé'));
+    months.push({ ym, label: monthYearLabel(ym), due: fee, paid, balance: Math.max(0, fee-paid), status });
+    m++; if (m>12){ m=1; y++; }
+    guard++;
+  }
+  return months;
+}
+function openDettesModal(){
+  ensureExt();
+  const students = DB.students.filter(s=>s.status!=='non_actif' && paymentStatusOf(s)==='payant');
+  const rows = students.map(s=>{
+    const ledger = studentDebtLedger(s.id);
+    const totalDue = ledger.reduce((a,m)=>a+m.balance,0);
+    const unpaidMonths = ledger.filter(m=>m.status==='impayé'||m.status==='partiel').length;
+    return `<tr>
+      <td>${esc(s.first_name+' '+s.last_name)}</td>
+      <td style="font-family:'DM Mono',monospace">${esc(s.matricule)}</td>
+      <td>${unpaidMonths}</td>
+      <td style="font-weight:700;color:${totalDue>0?'var(--danger)':'var(--ok)'}">${fmtGNF(totalDue)}</td>
+      <td style="text-align:right"><button class="fb fb-ghost fb-sm" onclick="openStudentLedger('${s.id}')">📅 Détail</button></td>
+    </tr>`;
+  }).join('');
+  openModal(`
+    <h3 style="margin:0 0 4px">📋 Dettes de scolarité</h3>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 14px">Élèves au statut « payant » — mois dus depuis leur inscription.</p>
+    <div class="table-wrap" style="max-height:440px;overflow:auto">
+      <table><thead><tr><th>Élève</th><th>Matricule</th><th>Mois en retard</th><th>Total dû</th><th></th></tr></thead><tbody>${rows||''}</tbody></table>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="fb fb-ghost" style="flex:1" onclick="closeModal()">Fermer</button>
+    </div>`);
+}
+function openStudentLedger(studentId){
+  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
+  const ledger = studentDebtLedger(studentId);
+  const badge = st => st==='payé' ? '<span class="badge badge-green">Payé</span>'
+    : st==='partiel' ? '<span class="badge badge-amber">Partiel</span>'
+    : st==='impayé' ? '<span class="badge badge-red">Impayé</span>'
+    : '<span class="badge badge-slate">—</span>';
+  const rows = ledger.map(mo=>`
+    <tr>
+      <td>${esc(mo.label)}</td>
+      <td>${fmtGNF(mo.due)}</td>
+      <td>${fmtGNF(mo.paid)}</td>
+      <td>${badge(mo.status)}</td>
+      <td style="text-align:right">${mo.balance>0?`<button class="fb fb-green fb-sm" onclick="closeModal();openPaymentForm('${studentId}','${mo.ym}',${mo.balance})">💰 Verser</button>`:''}</td>
+    </tr>`).join('');
+  openModal(`
+    <h3 style="margin:0 0 4px">📅 Scolarité — ${esc(s.first_name+' '+s.last_name)}</h3>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 14px">Matricule ${esc(s.matricule)} — mensualité ${fmtGNF(s.monthly_fee)}</p>
+    <div class="table-wrap" style="max-height:420px;overflow:auto">
+      <table><thead><tr><th>Mois</th><th>Dû</th><th>Payé</th><th>Statut</th><th></th></tr></thead><tbody>${rows||''}</tbody></table>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="fb fb-ghost" style="flex:1" onclick="openDettesModal()">← Retour</button>
+      <button class="fb fb-ghost" onclick="closeModal()">Fermer</button>
+    </div>`);
 }
 
 /** Reçu imprimable — généré automatiquement à chaque paiement. */
@@ -3405,6 +3798,10 @@ function ensureExt(){
   if (!DB.calendarHistory) DB.calendarHistory = {};
   if (typeof DB.courseDaysPerWeek !== 'number') DB.courseDaysPerWeek = 6;
   if (typeof DB.recitDaysPerWeek !== 'number')  DB.recitDaysPerWeek = 1;
+  if (!Array.isArray(DB.masteryLog))  DB.masteryLog = [];   // maîtrisé / non maîtrisé (onglet Lecture)
+  if (!DB.dailyRange) DB.dailyRange = {};                   // portions (sourate/verset) choisies manuellement, par jour
+  if (!Array.isArray(DB.historyLog))  DB.historyLog = [];   // journal des actions (suppressions, etc.)
+  if (!DB.studentAuth) DB.studentAuth = {};                 // pointage : identifiants biométriques / PIN par élève
 }
 
 /* ---- Période globale de filtrage (mois / année) partagée par les onglets ---- */
@@ -3681,14 +4078,14 @@ function printPaiementsList(){
   const rows = list.map(p=>{
     const s = DB.students.find(x=>x.id===p.student_id)||{};
     return [p.date, esc(p.receipt_no||'—'), esc((s.first_name||'')+' '+(s.last_name||'')),
-      esc(s.matricule||'—'), esc(p.label||''),
+      esc(s.matricule||'—'), esc(p.label||''), p.for_month?esc(monthYearLabel(p.for_month)):'—',
       p.status==='approved'?'Validé':(p.status==='pending'?'Attente':'Rejeté'),
       `<span class="r b">${fmtGNF(p.amount)}</span>`];
   });
   printA4('Registre des paiements',
     a4Kpis([{l:'Opérations',v:list.length},{l:'Encaissé validé',v:fmtGNF(tot)},{l:'En attente',v:fmtGNF(att)}])
-    + a4Table(['Date','N° reçu','Élève','Matricule','Motif','Statut','Montant'], rows,
-      ['','','','','','TOTAL VALIDÉ', `<span class="b">${fmtGNF(tot)}</span>`]),
+    + a4Table(['Date','N° reçu','Élève','Matricule','Motif','Mois concerné','Statut','Montant'], rows,
+      ['','','','','','','TOTAL VALIDÉ', `<span class="b">${fmtGNF(tot)}</span>`]),
     { signatures:true, sgLeft:'Le comptable', sgRight:'Le fondateur' });
 }
 
@@ -3955,26 +4352,35 @@ function renderLecture(){
     const p = getPlanning(s.id);
     const done = DB.lessons.filter(l=>l.student_id===s.id && l.date===todayStr()).length;
     const quota = todayQuota(s.id);
-    const port = p.level==='hourouf' ? null : portionInSourate(p.sourate, p.ayah, quota);
+    const rangeNew = getDailyRange(s.id,'new');
+    const rangeOld = getDailyRange(s.id,'old');
+    const port = (p.level!=='hourouf' && !rangeNew) ? portionInSourate(p.sourate, p.ayah, quota) : null;
     const nouvelle = p.level==='hourouf'
       ? `Lettre ${HOUROUF[p.hourouf_index]||'—'} (${p.hourouf_index+1}/${HOUROUF.length})`
-      : portionLabel(port) + (port.clamped?' <span class="badge badge-gold" style="font-size:9.5px">fin de sourate</span>':'');
+      : rangeNew
+        ? `${SOURATES[rangeNew.sourate-1][0]} ${rangeNew.from}${rangeNew.to>rangeNew.from?'-'+rangeNew.to:''}`
+        : portionLabel(port) + (port.clamped?' <span class="badge badge-gold" style="font-size:9.5px">fin de sourate</span>':'');
     const ancienne = p.level==='hourouf'
       ? (p.hourouf_index>0 ? `Lettres 1 → ${p.hourouf_index}` : '—')
-      : `${p.revision_per_day} verset(s) de révision`;
+      : rangeOld
+        ? `${SOURATES[rangeOld.sourate-1][0]} ${rangeOld.from}${rangeOld.to>rangeOld.from?'-'+rangeOld.to:''}`
+        : `${p.revision_per_day} verset(s) de révision`;
     return `<tr>
       <td><div style="display:flex;align-items:center;gap:9px">${photoThumb(s,34)}<div>
         ${esc(s.first_name+' '+s.last_name)}
         <div style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace">${esc(s.matricule)}</div></div></div></td>
       <td>${p.level==='hourouf'?'🔤 Hourouf':'📖 Djouzou '+p.juz}</td>
       <td><span class="lesson-link" title="Ouvrir la page du Coran à lire"
-            onclick="openReadingImage('${s.id}','new')"><b>${nouvelle}</b> 📖</span></td>
+            onclick="openReadingImage('${s.id}','new')"><b>${nouvelle}</b> 📖</span>
+            ${p.level==='hourouf'?'':`<button class="fb fb-ghost fb-sm" title="Choisir sourate/verset de départ et d'arrêt" onclick="openLessonRangeForm('${s.id}','new')">🎯</button>`}</td>
       <td><span class="lesson-link" title="Ouvrir la page de révision"
-            onclick="openReadingImage('${s.id}','old')">${esc(ancienne)} 📖</span></td>
+            onclick="openReadingImage('${s.id}','old')">${esc(ancienne)} 📖</span>
+            ${p.level==='hourouf'?'':`<button class="fb fb-ghost fb-sm" title="Choisir sourate/verset de départ et d'arrêt" onclick="openLessonRangeForm('${s.id}','old')">🎯</button>`}</td>
       <td>${done?'<span class="badge badge-green">Enseigné aujourd\'hui</span>':'<span class="badge badge-gold">À enseigner</span>'}</td>
       <td style="text-align:right;white-space:nowrap">
         ${p.level==='hourouf'?'':`<button class="fb fb-ghost fb-sm" title="Versets du jour" onclick="openQuotaForm('${s.id}')">🔢 ${quota}</button>`}
-        ${recitToday?'':`<button class="fb fb-green fb-sm" onclick="markTaught('${s.id}')">✅ Leçon apprise</button>`}
+        ${recitToday?'':`<button class="fb fb-green fb-sm" onclick="markMastery('${s.id}',true)">✅ Maîtrisé</button>
+        <button class="fb fb-danger fb-sm" onclick="markMastery('${s.id}',false)">❌ Non maîtrisé</button>`}
         <button class="fb fb-ghost fb-sm" onclick="markAbsent('${s.id}')">🚫 Absent</button>
       </td></tr>`;
   }).join('');
@@ -3990,9 +4396,16 @@ function renderLecture(){
     <div class="card" style="margin-bottom:14px">
       ${me?`<b>Mon groupe</b>
       <p style="color:var(--muted);font-size:12.5px;margin:6px 0 6px">${mine.length} élève(s) affilié(s) à votre groupe.</p>`:''}
+      <p style="color:var(--muted);font-size:12.5px;margin:0 0 4px">
+        🎯 Cliquez sur ce bouton pour choisir précisément la <b>sourate</b>, le <b>verset de départ</b> et le
+        <b>verset d'arrêt</b> de la nouvelle leçon ou de l'ancienne leçon (révision). Le rythme habituel
+        (versets/jour) se règle dans l'onglet <b>Planning cours</b>.</p>
+      <p style="color:var(--muted);font-size:12.5px;margin:0 0 4px">
+        🖼️ Cliquez sur le texte de la leçon pour générer l'image de la partie à lire (imprimable en A4,
+        téléchargeable en PNG et envoyable au tuteur).</p>
       <p style="color:var(--muted);font-size:12.5px;margin:0">
-        🖼️ Cliquez sur la <b>nouvelle leçon</b> ou l'<b>ancienne leçon</b> d'un élève pour générer
-        automatiquement l'image de la partie à lire (imprimable en A4, téléchargeable en PNG et envoyable au tuteur).</p>
+        ✅ <b>Maîtrisé</b> envoie la portion vers l'onglet <b>Restitution</b>. ❌ <b>Non maîtrisé</b> garde la
+        leçon ici : l'élève devra la reprendre.</p>
     </div>
     <div class="table-wrap">
       ${rows?`<table><thead><tr><th>Élève</th><th>Niveau</th><th>Nouvelle leçon</th><th>Ancienne leçon</th><th>Statut du jour</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
@@ -4000,8 +4413,53 @@ function renderLecture(){
     </div>`;
 }
 
-/** L'enseignant valide que la portion a été enseignée : elle passe en attente de restitution. */
-function markTaught(studentId){
+/** Sélection manuelle de la portion (sourate / verset de départ / verset d'arrêt) pour le jour. */
+function getDailyRange(studentId, which){
+  ensureExt();
+  return DB.dailyRange[studentId+'|'+todayStr()+'|'+which] || null;
+}
+function clearDailyRange(studentId, which){
+  ensureExt();
+  delete DB.dailyRange[studentId+'|'+todayStr()+'|'+which];
+}
+function openLessonRangeForm(studentId, which){
+  ensureExt();
+  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
+  const p = getPlanning(studentId);
+  const existing = getDailyRange(studentId, which);
+  const quota = todayQuota(studentId);
+  const autoNew = portionInSourate(p.sourate, p.ayah, quota);
+  const defSourate = existing ? existing.sourate : (which==='new' ? autoNew.s : p.sourate);
+  const defFrom = existing ? existing.from : (which==='new' ? autoNew.from : p.ayah);
+  const defTo = existing ? existing.to : (which==='new' ? autoNew.to : Math.max(defFrom, defFrom + Math.max(0,(Number(p.revision_per_day)||1)-1)));
+  const sOpts = SOURATES.map((x,i)=>`<option value="${i+1}" ${(i+1)===defSourate?'selected':''}>${i+1}. ${x[0]} (${x[1]} v.)</option>`).join('');
+  openModal(`
+    <h3 style="margin:0 0 4px">${which==='new'?'Nouvelle leçon':'Ancienne leçon (révision)'}</h3>
+    <p style="color:var(--muted);font-size:12.5px;margin:0 0 14px">${esc(s.first_name+' '+s.last_name)} — ${todayStr()}</p>
+    <div class="fg"><label class="fl">Sourate</label><select class="fi" id="lrSourate">${sOpts}</select></div>
+    <div class="fg2">
+      <div class="fg"><label class="fl">Verset de départ</label><input class="fi" type="number" min="1" id="lrFrom" value="${defFrom}"></div>
+      <div class="fg"><label class="fl">Verset d'arrêt</label><input class="fi" type="number" min="1" id="lrTo" value="${defTo}"></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="fb fb-gold" style="flex:1" onclick="saveLessonRange('${studentId}','${which}')">💾 Confirmer la portion</button>
+      <button class="fb fb-ghost" onclick="closeModal()">Annuler</button>
+    </div>`);
+}
+function saveLessonRange(studentId, which){
+  ensureExt();
+  const sourate = clampSourate(document.getElementById('lrSourate').value);
+  const total = SOURATES[sourate-1][1];
+  let from = Math.min(total, Math.max(1, Number(document.getElementById('lrFrom').value)||1));
+  let to   = Math.min(total, Math.max(from, Number(document.getElementById('lrTo').value)||from));
+  DB.dailyRange[studentId+'|'+todayStr()+'|'+which] = { sourate, from, to };
+  saveDB(); closeModal();
+  toast('Portion confirmée : '+SOURATES[sourate-1][0]+' '+from+(to>from?'-'+to:''));
+  renderLecture();
+}
+
+/** L'enseignant marque la portion « maîtrisée » (→ Restitution) ou « non maîtrisée » (reste en Lecture). */
+function markMastery(studentId, mastered){
   ensureExt();
   if (isRecitationDay()){
     toast('🎙️ Jour de restitution : aucune nouvelle leçon aujourd\'hui.');
@@ -4009,19 +4467,34 @@ function markTaught(studentId){
   }
   const p = getPlanning(studentId);
   const quota = todayQuota(studentId);
-  const port = p.level==='hourouf' ? null : portionInSourate(p.sourate, p.ayah, quota);
+  const rangeNew = p.level==='hourouf' ? null : getDailyRange(studentId,'new');
+  const port = (p.level!=='hourouf' && !rangeNew) ? portionInSourate(p.sourate, p.ayah, quota) : null;
+  const sourate = p.level==='hourouf' ? p.sourate : (rangeNew ? rangeNew.sourate : port.s);
+  const from    = p.level==='hourouf' ? null      : (rangeNew ? rangeNew.from   : port.from);
+  const to      = p.level==='hourouf' ? null      : (rangeNew ? rangeNew.to     : port.to);
   const label = p.level==='hourouf'
     ? `Lettre ${HOUROUF[p.hourouf_index]||''} (${p.hourouf_index+1})`
-    : portionLabel(port);
+    : `${SOURATES[sourate-1][0]} ${from}${to>from?'-'+to:''}`;
+
+  DB.masteryLog.push({ id:uid('ml'), student_id:studentId, date:todayStr(), label, level:p.level, mastered:!!mastered });
+
+  if (!mastered){
+    saveDB();
+    toast('❌ Portion non maîtrisée : '+label+' — l\'élève doit la reprendre.');
+    renderLecture();
+    return;
+  }
+
   const exist = DB.lessons.find(l=>l.student_id===studentId && l.status==='pending');
   if (exist){ toast('Une leçon est déjà en attente de restitution.'); return; }
   DB.lessons.push({ id:uid('ls'), student_id:studentId, date:todayStr(), level:p.level,
-    label, sourate:p.level==='hourouf'?p.sourate:port.s,
-    ayah:p.level==='hourouf'?p.ayah:(sourateOrderUp()?port.to:port.from),
-    count:p.level==='hourouf'?quota:port.count,
+    label, sourate:p.level==='hourouf'?p.sourate:sourate,
+    ayah:p.level==='hourouf'?p.ayah:(sourateOrderUp()?to:from),
+    count:p.level==='hourouf'?quota:(to-from+1),
     hourouf_index:p.hourouf_index, juz:p.juz, status:'pending',
     teacher_id:(myTeacher()||{}).id||null });
-  saveDB(); toast('Leçon enregistrée : '+label+' — à restituer.');
+  clearDailyRange(studentId,'new');
+  saveDB(); toast('✅ Maîtrisé : '+label+' — envoyé en restitution.');
   renderLecture();
 }
 function markAbsent(studentId){
@@ -4408,6 +4881,7 @@ function progressStats(studentId){
     if (dow===0 || dow===6) continue;              // week-end non compté
     if (!daysWith.has(ds) && !absDays.has(ds)) jours++;
   }
+  const mastery = DB.masteryLog.filter(m=>m.student_id===studentId&&inPeriod(m.date));
   return {
     level: p.level==='hourouf' ? 'Hourouf' : 'Djouzou '+p.juz,
     ok: recs.filter(r=>r.ok).length,
@@ -4416,7 +4890,10 @@ function progressStats(studentId){
     absences: att.length,
     causes: att.map(a=>a.date+' : '+(a.cause||'Non précisée')),
     position: p.level==='hourouf' ? ('Lettre '+HOUROUF[p.hourouf_index]) : rangeLabel(lessonRange(p)),
-    juzDone: (DB.students.find(x=>x.id===studentId)||{}).memorized_juz||[]
+    juzDone: (DB.students.find(x=>x.id===studentId)||{}).memorized_juz||[],
+    mastered: mastery.filter(m=>m.mastered).length,
+    notMastered: mastery.filter(m=>!m.mastered).length,
+    masteryDetail: mastery,
   };
 }
 
@@ -4447,9 +4924,12 @@ function printProgression(studentId){
       ['Niveau', st.level], ['Position actuelle', esc(st.position)],
       ['Djouzou mémorisés', st.juzDone.length+' / 30']]))
     + a4Kpis([{l:'Leçons validées',v:st.ok},{l:'Portions reprises',v:st.repeat},
-              {l:'Jours sans mémorisation',v:st.noMemo},{l:'Absences',v:st.absences}])
+              {l:'Jours sans mémorisation',v:st.noMemo},{l:'Absences',v:st.absences},
+              {l:'Maîtrisées (Lecture)',v:st.mastered},{l:'Non maîtrisées (Lecture)',v:st.notMastered}])
     + `<div class="sec">Détail des restitutions</div>`
     + a4Table(['Date','Portion','Résultat'], recs.map(r=>[r.date, esc(r.label), r.ok?'Validée':'Reprise']))
+    + `<div class="sec">Détail Lecture — maîtrisé / non maîtrisé</div>`
+    + a4Table(['Date','Portion','Résultat'], st.masteryDetail.slice().reverse().map(m=>[m.date, esc(m.label), m.mastered?'Maîtrisé':'Non maîtrisé']))
     + `<div class="sec">Absences et causes</div>`
     + a4Table(['Date','Cause'], att.map(a=>[a.date, esc(a.cause||'Non précisée')])),
     { subtitle:esc(s.first_name+' '+s.last_name)+' — '+periodLabel(),
@@ -4471,11 +4951,12 @@ function finBody(){
   return a4Kpis([{l:'Encaissements',v:fmtGNF(enc)},{l:'Autres revenus',v:fmtGNF(rev)},
                  {l:'Dépenses',v:fmtGNF(dep)},{l:'Bénéfice net',v:fmtGNF(enc+rev-dep)}])
     + `<div class="sec">Paiements encaissés</div>`
-    + a4Table(['Date','N° reçu','Élève','Motif','Montant'],
+    + a4Table(['Date','N° reçu','Élève','Motif','Mois concerné','Montant'],
         pays.map(p=>{ const s=DB.students.find(x=>x.id===p.student_id)||{};
           return [p.date, esc(p.receipt_no||'—'), esc((s.first_name||'')+' '+(s.last_name||'')), esc(p.label||''),
+            p.for_month?esc(monthYearLabel(p.for_month)):'—',
             `<span class="r b">${fmtGNF(p.amount)}</span>`]; }),
-        ['','','','TOTAL',`<span class="b">${fmtGNF(enc)}</span>`])
+        ['','','','','TOTAL',`<span class="b">${fmtGNF(enc)}</span>`])
     + `<div class="sec">Dépenses par catégorie</div>`
     + a4Table(['Catégorie','Montant'], Object.keys(byCat).map(k=>[esc(k), `<span class="r b">${fmtGNF(byCat[k])}</span>`]),
         ['TOTAL', `<span class="b">${fmtGNF(dep)}</span>`])
@@ -4961,7 +5442,12 @@ async function openReadingImage(studentId, type){
 
   /* ---- Niveau Coran : page de mushaf, bornée à la sourate ---- */
   let portion, title;
-  if (type==='old'){
+  const manualRange = getDailyRange(studentId, type==='old'?'old':'new');
+  if (manualRange){
+    portion = { s:manualRange.sourate, from:manualRange.from, to:manualRange.to,
+                count:(manualRange.to-manualRange.from+1), clamped:false, total:SOURATES[manualRange.sourate-1][1] };
+    title = type==='old' ? 'Ancienne leçon — révision' : 'Nouvelle leçon';
+  } else if (type==='old'){
     const n = Math.max(0, Number(p.revision_per_day)||0);
     if (!n){ toast("Aucune ancienne leçon : définissez un nombre de versets de révision."); return; }
     portion = previousPortion(p, n);
@@ -5475,19 +5961,41 @@ function saveEditPayment(id){
   const p = DB.payments.find(x=>x.id===id); if(!p) return;
   const amt = Number(document.getElementById('epAmount').value)||0;
   if (amt <= 0){ toast('Le montant doit être supérieur à zéro.'); return; }
+  const wasApproved = p.status==='approved';
   p.label  = document.getElementById('epLabel').value.trim() || p.label;
   p.amount = amt;
   p.date   = document.getElementById('epDate').value || p.date;
   p.status = document.getElementById('epStatus').value;
+  const nowApproved = p.status==='approved';
+  // Garder les recettes (DB.transactions) cohérentes avec le statut/montant modifié.
+  DB.transactions = DB.transactions.filter(t=>t.payment_id!==p.id);
+  if (nowApproved) pushPaymentTransaction(p);
+  if (wasApproved !== nowApproved){
+    const s = DB.students.find(x=>x.id===p.student_id);
+    logAction('Modification de paiement',
+      (s?(s.first_name+' '+s.last_name):'—') + ' — ' + fmtGNF(p.amount) +
+      (nowApproved ? ' (repasse en recettes)' : ' (retiré des recettes)'));
+  }
   p.edited_at = Date.now();
   p.edited_by = (currentUser()||{}).id || null;
   saveDB(); closeModal(); toast('Paiement modifié.'); navigate('paiements');
 }
 function deletePayment(id){
   if (!canEditRecords()){ toast("⛔ Non autorisé."); return; }
+  const p = DB.payments.find(x=>x.id===id); if(!p) return;
   if (!confirm('Supprimer définitivement ce paiement ?')) return;
+  const s = DB.students.find(x=>x.id===p.student_id);
+  const wasApproved = p.status==='approved';
+  // Retirer aussi la recette correspondante des transactions, pour que le
+  // bénéfice du tableau de bord se corrige automatiquement.
+  DB.transactions = DB.transactions.filter(t=>t.payment_id!==p.id);
   DB.payments = DB.payments.filter(x=>x.id!==id);
-  saveDB(); closeModal(); toast('Paiement supprimé.'); navigate('paiements');
+  logAction('Suppression de paiement',
+    (s?(s.first_name+' '+s.last_name):'Élève inconnu') + ' — ' + fmtGNF(p.amount) +
+    (wasApproved ? ' (montant retiré des recettes/bénéfices)' : ' (paiement non encore comptabilisé)'));
+  saveDB(); closeModal();
+  toast('Paiement supprimé' + (wasApproved ? ' — montant retiré des recettes.' : '.'));
+  navigate('paiements');
 }
 
 /* ---------------------------------------------------------------------
@@ -6402,6 +6910,44 @@ function printTeacherPayslip(teacherId){
       sgLeft:"L'enseignant", sgRight:'Le fondateur',
       shareText:`Bulletin de paie — ${u.first_name||''} ${u.last_name||''}\n${periodLabel()}\nNet à payer : ${fmtGNF(tot)}`,
       phone:u.phone });
+}
+
+/* =====================================================================
+   HISTORIQUE — journal des actions (audit trail)
+   Toute suppression ou changement financier sensible y est enregistré.
+   Seul le fondateur peut supprimer une entrée (ou tout l'historique).
+   ===================================================================== */
+function renderHistorique(){
+  ensureExt();
+  const list = DB.historyLog.slice().reverse().slice(0,300);
+  const rows = list.map(h=>`
+    <tr>
+      <td style="white-space:nowrap">${esc(h.date)} <span style="color:var(--muted);font-size:10.5px">${new Date(h.at).toLocaleTimeString()}</span></td>
+      <td>${esc(h.action)}</td>
+      <td>${esc(h.detail)}</td>
+      <td>${esc(h.user)}${h.role?' · '+esc(roleLabel(h.role)):''}</td>
+      <td style="text-align:right">${isFondateur()?`<button class="fb fb-danger fb-sm" onclick="deleteHistoryEntry('${h.id}')">🗑️</button>`:''}</td>
+    </tr>`).join('');
+
+  document.getElementById('pageContent').innerHTML = `
+    ${pageHead('Historique', DB.historyLog.length+" mouvement(s) enregistré(s) — suppressions, approbations et autres actions sensibles",
+      isFondateur() ? `<button class="fb fb-danger fb-sm" onclick="deleteAllHistory()">🗑️ Vider l'historique</button>` : '')}
+    <div class="table-wrap">
+      ${rows ? `<table><thead><tr><th>Date</th><th>Action</th><th>Détail</th><th>Par</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+      : `<div class="empty-state"><div class="em">🕓</div>Aucune action enregistrée pour l'instant.</div>`}
+    </div>`;
+}
+function deleteHistoryEntry(id){
+  if (!isFondateur()){ toast("⛔ Seul le fondateur peut supprimer l'historique."); return; }
+  if (!confirm('Supprimer cette entrée de l\'historique ?')) return;
+  DB.historyLog = DB.historyLog.filter(h=>h.id!==id);
+  saveDB(); renderHistorique();
+}
+function deleteAllHistory(){
+  if (!isFondateur()){ toast("⛔ Seul le fondateur peut supprimer l'historique."); return; }
+  if (!confirm("Vider tout l'historique ? Cette action est irréversible.")) return;
+  DB.historyLog = [];
+  saveDB(); renderHistorique();
 }
 
 /* =====================================================================
