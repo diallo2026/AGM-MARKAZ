@@ -1696,57 +1696,82 @@ function visibleStudents(){
   if (u.role==='enseignant'){ const t=myTeacher(); list = list.filter(s=>s.teacher_id===t?.id); }
   if (studentSearch){
     const q = studentSearch.toLowerCase();
-    list = list.filter(s => (s.first_name+' '+s.last_name+' '+s.matricule).toLowerCase().includes(q));
+    list = list.filter(s => (s.first_name+' '+s.last_name+' '+s.matricule+' '+(s.guardian_name||'')).toLowerCase().includes(q));
   }
   return list.sort((a,b)=>(a.last_name||'').localeCompare(b.last_name||''));
 }
 
 let teacherFilter = '';
-function renderStudents(){
-  ensureExt();
+let studentSearchTimer = null;
+/** Recherche avec léger différé (anti-saccades) : ne redessine que le tableau,
+ *  jamais la barre de recherche elle-même — l'input garde le focus et le curseur. */
+function onStudentSearchInput(val){
+  studentSearch = val;
+  clearTimeout(studentSearchTimer);
+  studentSearchTimer = setTimeout(renderStudentsTable, 120);
+}
+function onTeacherFilterChange(val){
+  teacherFilter = val;
+  renderStudentsTable();
+}
+function studentsFilteredList(){
   let list = visibleStudents();
   if (teacherFilter === '__none__') list = list.filter(s=>!s.teacher_id);
   else if (teacherFilter) list = list.filter(s=>s.teacher_id===teacherFilter);
-  const rows = list.map(s => {
-    const teacher = DB.teachers.find(t=>t.id===s.teacher_id);
-    const tUser = teacher ? DB.users.find(u=>u.id===teacher.user_id) : null;
-    return `<tr>
-      <td style="font-family:'DM Mono',monospace;color:var(--gold-light)">${esc(s.matricule)}</td>
-      <td><div style="display:flex;align-items:center;gap:9px">${photoThumb(s,34)}<span>${esc(s.first_name+' '+s.last_name)}</span></div></td>
-      <td>${categoryLabel(s.category)}</td>
-      <td>${tUser ? esc(tUser.first_name+' '+tUser.last_name) : '<span style="color:var(--muted)">—</span>'}</td>
-      <td>${(s.memorized_juz||[]).length} / 30</td>
-      <td style="font-size:11.5px">${esc(studentPositionLabel(s))}</td>
-      <td style="cursor:${canEditRecords()?'pointer':'default'}" ${canEditRecords()?`onclick="toggleStudentPayStatus('${s.id}')" title="Cliquer pour changer le statut"`:''}>${paymentStatusBadgeStudent(s)}</td>
-      <td style="text-align:right">
-        <button class="fb fb-ghost fb-sm" onclick="viewStudent('${s.id}')">👁️ Voir</button>
-        ${canEditRecords()?`<button class="fb fb-ghost fb-sm" onclick="openEditStudent('${s.id}')">✏️</button>`:''}
-        <button class="fb fb-green fb-sm" onclick="openSituationForm('${s.id}')">📤 Situation</button>
-        <button class="fb fb-ghost fb-sm" onclick="printProgression('${s.id}')">📈 Progrès</button>
-        <button class="fb fb-danger fb-sm" onclick="archiveStudent('${s.id}')">🗄️</button>
-      </td>
-    </tr>`;
-  }).join('');
-
+  return list;
+}
+function studentRowHtml(s){
+  const teacher = DB.teachers.find(t=>t.id===s.teacher_id);
+  const tUser = teacher ? DB.users.find(u=>u.id===teacher.user_id) : null;
+  return `<tr>
+    <td style="font-family:'DM Mono',monospace;color:var(--gold-light)">${esc(s.matricule)}</td>
+    <td><div style="display:flex;align-items:center;gap:9px">${photoThumb(s,34)}<span>${esc(s.first_name+' '+s.last_name)}</span></div></td>
+    <td>${categoryLabel(s.category)}</td>
+    <td>${tUser ? esc(tUser.first_name+' '+tUser.last_name) : '<span style="color:var(--muted)">—</span>'}</td>
+    <td>${(s.memorized_juz||[]).length} / 30</td>
+    <td style="font-size:11.5px">${esc(studentPositionLabel(s))}</td>
+    <td style="cursor:${canEditRecords()?'pointer':'default'}" ${canEditRecords()?`onclick="toggleStudentPayStatus('${s.id}')" title="Cliquer pour changer le statut"`:''}>${paymentStatusBadgeStudent(s)}</td>
+    <td style="text-align:right">
+      <button class="fb fb-ghost fb-sm" onclick="viewStudent('${s.id}')">👁️ Voir</button>
+      ${canEditRecords()?`<button class="fb fb-ghost fb-sm" onclick="openEditStudent('${s.id}')">✏️</button>`:''}
+      <button class="fb fb-green fb-sm" onclick="openSituationForm('${s.id}')">📤 Situation</button>
+      <button class="fb fb-ghost fb-sm" onclick="printProgression('${s.id}')">📈 Progrès</button>
+      <button class="fb fb-danger fb-sm" onclick="archiveStudent('${s.id}')">🗄️</button>
+    </td>
+  </tr>`;
+}
+/** Ne met à jour que le compteur et le corps du tableau — jamais la barre de
+ *  recherche/le filtre — pour que la saisie reste fluide même sur une longue liste. */
+function renderStudentsTable(){
+  ensureExt();
+  const list = studentsFilteredList();
+  const rows = list.map(studentRowHtml).join('');
   const payantCount = list.filter(s=>paymentStatusOf(s)==='payant').length;
   const nonPayantCount = list.length - payantCount;
-
+  const sub = document.getElementById('studentsCountSub');
+  if (sub) sub.textContent = list.length+' élève(s) — '+payantCount+' payant(s), '+nonPayantCount+' non payant(s)';
+  const wrap = document.getElementById('studentsTableWrap');
+  if (!wrap) return;
+  wrap.innerHTML = list.length
+    ? `<table><thead><tr><th>Matricule</th><th>Nom</th><th>Catégorie</th><th>Enseignant</th><th>Djouzou</th><th>Position</th><th>Statut</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<div class="empty-state"><div class="em">🎓</div>Aucun élève. Cliquez sur « Nouvel élève » pour commencer.</div>`;
+}
+function renderStudents(){
+  ensureExt();
   document.getElementById('pageContent').innerHTML = `
-    ${pageHead('Élèves', list.length+' élève(s) — '+payantCount+' payant(s), '+nonPayantCount+' non payant(s)', `<button class="fb fb-gold" onclick="openStudentForm()">+ Nouvel élève</button> `+printBtn('printStudentsList()'))}
-    ${filterBar('renderStudents()')}
+    ${pageHead('Élèves', '<span id="studentsCountSub"></span>', `<button class="fb fb-gold" onclick="openStudentForm()">+ Nouvel élève</button> `+printBtn('printStudentsList()'))}
+    ${filterBar('renderStudentsTable()')}
     <div class="search-bar" style="gap:8px;flex-wrap:wrap">
-      <input class="fi" placeholder="🔎 Rechercher un nom ou matricule…" value="${esc(studentSearch)}" oninput="studentSearch=this.value;renderStudents()">
-      <select class="fi" style="max-width:220px" onchange="teacherFilter=this.value;renderStudents()">
+      <input class="fi" placeholder="🔎 Rechercher par nom, matricule ou tuteur…" value="${esc(studentSearch)}" oninput="onStudentSearchInput(this.value)">
+      <select class="fi" style="max-width:220px" onchange="onTeacherFilterChange(this.value)">
         <option value="">👥 Tous les enseignants</option>
         ${DB.teachers.map(t=>{ const u=DB.users.find(x=>x.id===t.user_id)||{};
           return `<option value="${t.id}" ${teacherFilter===t.id?'selected':''}>${esc((u.first_name||'')+' '+(u.last_name||''))}</option>`;}).join('')}
         <option value="__none__" ${teacherFilter==='__none__'?'selected':''}>— Sans enseignant —</option>
       </select>
     </div>
-    <div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Matricule</th><th>Nom</th><th>Catégorie</th><th>Enseignant</th><th>Djouzou</th><th>Position</th><th>Statut</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
-      : `<div class="empty-state"><div class="em">🎓</div>Aucun élève. Cliquez sur « Nouvel élève » pour commencer.</div>`}
-    </div>`;
+    <div class="table-wrap" id="studentsTableWrap"></div>`;
+  renderStudentsTable();
 }
 
 /** Libellé compact : djouzou en cours + sourate/verset où l'élève est actuellement rendu. */
