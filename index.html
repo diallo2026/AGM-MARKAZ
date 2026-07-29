@@ -749,9 +749,13 @@ function cloudLinked(){ return cloudAvailable() && DB && DB.markazInfo && DB.mar
 
 /** Construit l'instantané des données à envoyer au cloud. */
 function cloudBuildPayload(){
-  // On envoie toute la base SAUF markazInfo (stocké séparément dans /info).
+  // On envoie toute la base SAUF :
+  // - markazInfo (stocké séparément dans /info) ;
+  // - studentAuth (PIN, signatures faciales, identifiants d'empreinte) :
+  //   les données biométriques restent EXCLUSIVEMENT sur l'appareil de
+  //   pointage — elles ne montent JAMAIS sur Firebase ni chez aucun tiers.
   const p = {};
-  Object.keys(DB).forEach(k => { if (k !== 'markazInfo') p[k] = DB[k]; });
+  Object.keys(DB).forEach(k => { if (k !== 'markazInfo' && k !== 'studentAuth') p[k] = DB[k]; });
   try {
     p._meta = {
       updatedAt: firebase.database.ServerValue.TIMESTAMP,
@@ -886,12 +890,14 @@ function cloudApplyRemote(data){
   try {
     const keepSession = SESSION;
     const keepInfo = DB.markazInfo;
+    const keepAuth = DB.studentAuth;   // données biométriques : locales à l'appareil, jamais synchronisées
     // Application champ par champ : on ne remplace que ce qui est présent.
     Object.keys(data).forEach(function(k){
       if (k === '_meta') return;
       DB[k] = data[k];
     });
     DB.markazInfo = keepInfo;   // markazInfo reste géré localement / via /info
+    DB.studentAuth = keepAuth || {};  // on restaure l'état local (le cloud n'en contient pas)
     ['users','teachers','students','juz','progressions','evaluations','transactions',
      'payments','purchases','salaries','consumables','stockMovements','archives']
       .forEach(function(k){ if (!Array.isArray(DB[k])) DB[k] = []; });
@@ -2376,7 +2382,11 @@ function openPointageEnroll(studentId){
   const hasBridge = !!bioBridgeUrl();
   openModal(`
     <h3 style="margin:0 0 4px">🔐 Pointage — ${esc(s.first_name+' '+s.last_name)}</h3>
-    <p style="color:var(--muted);font-size:11.5px;margin:0 0 14px">Trois méthodes indépendantes, au choix.</p>
+    <p style="color:var(--muted);font-size:11.5px;margin:0 0 14px">Trois méthodes indépendantes, au choix.
+      🔒 <b>Confidentialité :</b> les visages, photos et empreintes enregistrés ici restent
+      UNIQUEMENT sur cet appareil de pointage — ils ne sont jamais envoyés sur internet,
+      ni dans le cloud, ni dans les sauvegardes. Conséquence : enregistrez-les sur
+      l'appareil qui servira au pointage.</p>
 
     <div class="card" style="margin-bottom:12px">
       <b>🔢 Code PIN</b>
@@ -2414,8 +2424,8 @@ function openPointageEnroll(studentId){
       <b>🪪 Photo de vérification (aide visuelle — PAS une biométrie)</b>
       <p style="color:var(--muted);font-size:11.5px;margin:6px 0 10px">
         Une photo de référence s'affichera au pointage pour qu'un adulte confirme visuellement
-        l'identité — ce n'est en aucun cas une reconnaissance automatique. Elle est envoyée vers
-        un espace de stockage séparé (Firebase Storage), pas dans la base de données elle-même.</p>
+        l'identité — ce n'est en aucun cas une reconnaissance automatique. Elle reste stockée
+        uniquement sur cet appareil, jamais dans le cloud.</p>
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
         <div id="bioImgBox" style="width:76px;height:76px;border-radius:12px;background:var(--panel2);
           border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:26px;overflow:hidden">
@@ -2475,9 +2485,8 @@ function pickBioImage(evt, studentId){
   readPhotoFile(f, data => {
     if (!data) return;
     DB.studentAuth[studentId] = Object.assign({}, DB.studentAuth[studentId]||{}, { bioImage: data });
-    saveDB();
-    queueBioImageUpload(studentId);  // envoi vers Firebase Storage (hors de la base) dès que possible
-    toast('🪪 Photo de vérification enregistrée.');
+    saveDB();  // studentAuth est exclu de la synchro cloud : cette photo reste sur CET appareil
+    toast('🪪 Photo de vérification enregistrée (locale à cet appareil).');
     openPointageEnroll(studentId);
   });
 }
@@ -2669,12 +2678,16 @@ function genReceiptNo(){
 function recordPayment(data){
   const u = currentUser();
   const autoApproved = isFondateur() || u.role==='admin';
+  // Un paiement peut couvrir PLUSIEURS mois à la fois (avance de scolarité).
+  const months = Array.isArray(data.for_months) && data.for_months.length
+    ? data.for_months.slice() : (data.for_month ? [data.for_month] : []);
   const p = {
     id: uid('pay'), receipt_no: genReceiptNo(),
     student_id: data.student_id, amount: Number(data.amount),
     label: data.label || 'Frais de scolarité',
     date: data.date || todayStr(),
-    for_month: data.for_month || null,   // mois de scolarité concerné (YYYY-MM), pour le suivi des dettes
+    for_month: months[0] || null,          // rétrocompatibilité (premier mois)
+    for_months: months.length ? months : null,  // TOUS les mois couverts par ce paiement
     recorded_by: u.id, recorded_by_name: u.first_name+' '+u.last_name, recorded_role: u.role,
     status: autoApproved ? 'approved' : 'pending',
     approved_by: autoApproved ? u.id : null,
@@ -2685,13 +2698,24 @@ function recordPayment(data){
   saveDB();
   return p;
 }
+/** Tous les mois (YYYY-MM) couverts par un paiement, qu'il en couvre un seul ou plusieurs. */
+function paymentMonths(p){
+  if (Array.isArray(p.for_months) && p.for_months.length) return p.for_months;
+  if (p.for_month) return [p.for_month];
+  return [];
+}
+/** Libellé lisible de tous les mois d'un paiement : « Août 2026, Septembre 2026 ». */
+function paymentMonthsLabel(p){
+  return paymentMonths(p).map(monthYearLabel).join(', ');
+}
 
 function pushPaymentTransaction(p){
   const s = DB.students.find(x=>x.id===p.student_id);
+  const monthsTxt = paymentMonthsLabel(p);
   DB.transactions.push({
     id: uid('tx'), type:'income', category:'Frais de scolarité',
     amount: p.amount, date: p.date, payment_id: p.id,
-    description: p.label + (p.for_month?' ('+monthYearLabel(p.for_month)+')':'') + ' — ' + (s ? s.first_name+' '+s.last_name+' ('+s.matricule+')' : ''),
+    description: p.label + (monthsTxt?' ('+monthsTxt+')':'') + ' — ' + (s ? s.first_name+' '+s.last_name+' ('+s.matricule+')' : ''),
   });
 }
 /** Libellé lisible d'un mois « YYYY-MM » -> « Février 2026 ». */
@@ -2789,7 +2813,7 @@ function renderPaiements(){
       <td style="font-family:'DM Mono',monospace;color:var(--gold-light)">${esc(p.receipt_no)}</td>
       <td>${s?esc(s.first_name+' '+s.last_name):'—'}</td>
       <td>${esc(p.label)}</td>
-      <td>${p.for_month?esc(monthYearLabel(p.for_month)):'<span style="color:var(--muted)">—</span>'}</td>
+      <td>${paymentMonths(p).length?esc(paymentMonthsLabel(p)):'<span style="color:var(--muted)">—</span>'}</td>
       <td>${p.date}</td>
       <td style="font-weight:700">${fmtGNF(p.amount)}</td>
       <td>${paymentStatusBadge(p)}</td>
@@ -2814,30 +2838,83 @@ function renderPaiements(){
 }
 
 function currentMonthYM(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
-
-/** monthSelectOptions(selectedYM) — sélecteur Mois/Année (jusqu'en 2040) pour la scolarité concernée. */
-function monthSelectOptions(selectedYM){
-  const [sy, sm] = (selectedYM||currentMonthYM()).split('-').map(Number);
+/** Cases à cocher Mois/Année (fenêtre glissante : année-1 à année+3) — permet de cocher
+ *  plusieurs mois d'un coup pour un paiement d'avance de scolarité. */
+function payMonthCheckboxesHtml(preselect){
   const nowY = new Date().getFullYear();
-  const startY = Math.min(nowY-1, sy||nowY);
-  let opts = '';
-  for (let y=startY; y<=2040; y++){
+  const pre = preselect ? [preselect] : [currentMonthYM()];
+  let html = '';
+  for (let y=nowY-1; y<=nowY+3; y++){
     for (let m=1; m<=12; m++){
       const ym = y+'-'+String(m).padStart(2,'0');
-      opts += `<option value="${ym}" ${ym===selectedYM?'selected':''}>${monthLabel(m)} ${y}</option>`;
+      html += `<label style="display:flex;align-items:center;gap:5px;font-size:11.5px;padding:3px 4px">
+        <input type="checkbox" class="payMonthChk" value="${ym}" ${pre.includes(ym)?'checked':''} onchange="updatePayMonthHint()"> ${monthLabel(m)} ${y}
+      </label>`;
     }
   }
-  return opts;
+  return html;
+}
+function updatePayMonthHint(){
+  const hint = document.getElementById('payMonthHint');
+  if (!hint) return;
+  const n = document.querySelectorAll('.payMonthChk:checked').length;
+  const sid = (document.getElementById('payStudentId')||{}).value;
+  const s = DB.students.find(x=>x.id===sid);
+  const fee = s ? Number(s.monthly_fee)||0 : 0;
+  hint.textContent = n + ' mois sélectionné(s)' + (fee ? ' — montant suggéré : '+fmtGNF(fee*n) : '');
+}
+function applySuggestedAmount(){
+  const n = document.querySelectorAll('.payMonthChk:checked').length;
+  const sid = (document.getElementById('payStudentId')||{}).value;
+  const s = DB.students.find(x=>x.id===sid);
+  const fee = s ? Number(s.monthly_fee)||0 : 0;
+  if (!n || !fee){ toast('Sélectionnez un élève et au moins un mois.'); return; }
+  document.getElementById('payAmount').value = fee*n;
+  toast('Montant suggéré appliqué : '+fmtGNF(fee*n));
+}
+
+/** Recherche d'élève par nom OU matricule dans le formulaire de paiement (typeahead). */
+let PAY_STUDENT_OPTIONS = [];
+function studentDisplayName(id){
+  const s = DB.students.find(x=>x.id===id);
+  return s ? (s.first_name+' '+s.last_name+' — '+s.matricule) : '';
+}
+function filterPayStudent(q){
+  const box = document.getElementById('payStudentResults');
+  if (!box) return;
+  const query = (q||'').trim().toLowerCase();
+  if (!query){ box.innerHTML=''; return; }
+  const matches = PAY_STUDENT_OPTIONS.filter(s=>
+    (s.first_name+' '+s.last_name+' '+s.matricule).toLowerCase().includes(query)).slice(0,8);
+  box.innerHTML = matches.length
+    ? `<div style="position:absolute;z-index:20;left:0;right:0;background:var(--panel);border:1px solid var(--line);border-radius:8px;margin-top:4px;max-height:180px;overflow:auto;box-shadow:0 6px 18px rgba(0,0,0,.3)">
+      ${matches.map(s=>`<div style="padding:8px 10px;cursor:pointer;font-size:12.5px" onmousedown="selectPayStudent('${s.id}')">${esc(s.first_name+' '+s.last_name)} <span style="color:var(--muted);font-family:'DM Mono',monospace">— ${esc(s.matricule)}</span></div>`).join('')}
+    </div>`
+    : `<div style="position:absolute;z-index:20;left:0;right:0;background:var(--panel);border:1px solid var(--line);border-radius:8px;margin-top:4px;padding:8px 10px;font-size:12px;color:var(--muted)">Aucun élève trouvé.</div>`;
+}
+function selectPayStudent(id){
+  const s = DB.students.find(x=>x.id===id); if(!s) return;
+  const idEl = document.getElementById('payStudentId');
+  const searchEl = document.getElementById('payStudentSearch');
+  if (idEl) idEl.value = id;
+  if (searchEl) searchEl.value = s.first_name+' '+s.last_name+' — '+s.matricule;
+  const box = document.getElementById('payStudentResults'); if (box) box.innerHTML='';
+  updatePayMonthHint();
 }
 
 function openPaymentForm(presetStudentId, presetMonth, presetAmount){
   const activeStudents = DB.students.filter(s=>s.status!=='non_actif' && paymentStatusOf(s)==='payant');
   if (!activeStudents.length){ toast("Aucun élève au statut « payant » à saisir (les élèves graciés n'apparaissent pas ici)."); return; }
-  const ym = presetMonth || currentMonthYM();
+  PAY_STUDENT_OPTIONS = activeStudents;
   openModal(`
     <h3>${presetMonth?'Versement — frais de scolarité':'Nouveau paiement élève'}</h3>
-    <div class="fg"><label class="fl">Élève *</label>
-      <select class="fi" id="payStudent">${activeStudents.map(s=>`<option value="${s.id}" ${s.id===presetStudentId?'selected':''}>${esc(s.first_name+' '+s.last_name)} — ${esc(s.matricule)}</option>`).join('')}</select>
+    <div class="fg" style="position:relative">
+      <label class="fl">Élève * (tapez un nom ou un matricule)</label>
+      <input class="fi" id="payStudentSearch" autocomplete="off" placeholder="🔎 Nom ou matricule…"
+        value="${presetStudentId?esc(studentDisplayName(presetStudentId)):''}"
+        oninput="filterPayStudent(this.value)">
+      <input type="hidden" id="payStudentId" value="${presetStudentId||''}">
+      <div id="payStudentResults"></div>
     </div>
     <div class="fg"><label class="fl">Motif</label>
       <select class="fi" id="payLabel" onchange="toggleMonthField()">
@@ -2846,18 +2923,23 @@ function openPaymentForm(presetStudentId, presetMonth, presetAmount){
       </select>
     </div>
     <div class="fg" id="payMonthWrap" style="display:block">
-      <label class="fl">Mois de scolarité concerné</label>
-      <select class="fi" id="payMonth">${monthSelectOptions(ym)}</select>
+      <label class="fl">Mois de scolarité concernés (cochez-en plusieurs pour un paiement d'avance)</label>
+      <div id="payMonthChecks" style="max-height:170px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px;display:grid;grid-template-columns:repeat(2,1fr)">
+        ${payMonthCheckboxesHtml(presetMonth)}
+      </div>
+      <div id="payMonthHint" style="font-size:11px;color:var(--muted);margin-top:6px"></div>
+      <button type="button" class="fb fb-ghost fb-sm" style="margin-top:6px" onclick="applySuggestedAmount()">↺ Suggérer le montant (mensualité × mois cochés)</button>
     </div>
     <div class="fg2">
       <div class="fg"><label class="fl">Montant (GNF) *</label><input class="fi" type="number" id="payAmount" placeholder="0" value="${presetAmount||''}"></div>
-      <div class="fg"><label class="fl">Date</label><input class="fi" type="date" id="payDate" value="${todayStr()}"></div>
+      <div class="fg"><label class="fl">Date du paiement</label><input class="fi" type="date" id="payDate" value="${todayStr()}"></div>
     </div>
     ${isComptable() ? '<p style="color:var(--muted);font-size:11.5px;margin-bottom:10px">Votre saisie apparaît immédiatement dans votre tableau, puis attend l’approbation du fondateur avant d’entrer dans les recettes.</p>' : ''}
     <div style="display:flex;gap:8px;margin-top:6px">
       <button class="fb fb-gold" style="flex:1" onclick="savePaymentForm()">💾 Enregistrer + Reçu</button>
       <button class="fb fb-ghost" onclick="closeModal()">Annuler</button>
     </div>`);
+  updatePayMonthHint();
 }
 /** Affiche le sélecteur de mois uniquement quand le motif est « Frais de scolarité ». */
 function toggleMonthField(){
@@ -2869,14 +2951,20 @@ function toggleMonthField(){
 function savePaymentForm(){
   const amount = Number(document.getElementById('payAmount').value);
   if (!amount || amount<=0){ toast('Montant invalide.'); return; }
+  const studentId = (document.getElementById('payStudentId')||{}).value;
+  if (!studentId){ toast("Sélectionnez un élève : tapez son nom ou son matricule puis cliquez sur son nom dans la liste."); return; }
   const label = document.getElementById('payLabel').value;
-  const monthEl = document.getElementById('payMonth');
+  let months = [];
+  if (label==='Frais de scolarité'){
+    months = Array.from(document.querySelectorAll('.payMonthChk:checked')).map(c=>c.value);
+    if (!months.length){ toast('Cochez au moins un mois de scolarité.'); return; }
+  }
   const p = recordPayment({
-    student_id: document.getElementById('payStudent').value,
+    student_id: studentId,
     amount,
     label,
     date: document.getElementById('payDate').value,
-    for_month: (label==='Frais de scolarité' && monthEl) ? monthEl.value : null,
+    for_months: months,
   });
   closeModal();
   toast(p.status==='approved' ? 'Paiement validé — reçu généré.' : 'Paiement enregistré — en attente d’approbation.');
@@ -2897,8 +2985,12 @@ function studentDebtLedger(studentId){
   let y = enroll.getFullYear(), m = enroll.getMonth()+1;
   const now = new Date(); const endY = now.getFullYear(), endM = now.getMonth()+1;
   const paidByMonth = {};
-  DB.payments.filter(p=>p.student_id===studentId && p.label==='Frais de scolarité' && p.for_month && p.status!=='rejected')
-    .forEach(p=>{ paidByMonth[p.for_month] = (paidByMonth[p.for_month]||0) + Number(p.amount||0); });
+  DB.payments.filter(p=>p.student_id===studentId && p.label==='Frais de scolarité' && p.status!=='rejected' && paymentMonths(p).length)
+    .forEach(p=>{
+      const months = paymentMonths(p);
+      const share = Number(p.amount||0) / months.length;
+      months.forEach(ym => { paidByMonth[ym] = (paidByMonth[ym]||0) + share; });
+    });
   const months = [];
   // Sécurité : borne à 60 mois pour éviter une boucle démesurée sur une très ancienne inscription.
   let guard = 0;
@@ -2975,6 +3067,7 @@ function printReceipt(paymentId){
   if (!w){ toast('Autorisez les fenêtres pop-up pour imprimer le reçu.'); return; }
   const html = `<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>${p.receipt_no}</title>
   <style>
+    *{ -webkit-print-color-adjust:exact!important; print-color-adjust:exact!important; color-adjust:exact!important; }
     body{font-family:Arial,sans-serif;margin:0;padding:22px;color:#0f2417}
     .rc{max-width:360px;margin:0 auto;border:2px solid #15803d;border-radius:12px;padding:18px}
     .hd{display:flex;align-items:center;gap:12px;border-bottom:2px dashed #15803d;padding-bottom:12px;margin-bottom:12px}
@@ -2997,7 +3090,8 @@ function printReceipt(paymentId){
     <div class="row"><span>Élève</span><b>${esc((s.first_name||'')+' '+(s.last_name||''))}</b></div>
     <div class="row"><span>Matricule</span><b>${esc(s.matricule||'—')}</b></div>
     <div class="row"><span>Motif</span><b>${esc(p.label)}</b></div>
-    <div class="row"><span>Date</span><b>${p.date}</b></div>
+    ${paymentMonths(p).length?`<div class="row"><span>Mois payé(s)</span><b>${esc(paymentMonthsLabel(p))}</b></div>`:''}
+    <div class="row"><span>Date de paiement</span><b>${p.date}</b></div>
     <div class="row"><span>Reçu par</span><b>${esc(p.recorded_by_name)} (${roleLabel(p.recorded_role)})</b></div>
     <div class="amt">${fmtGNF(p.amount)}</div>
     <div class="st">${statusTxt}</div>
@@ -4196,6 +4290,7 @@ function a4Styles(){
   return `
     @page { size:A4; margin:12mm; }
     *{box-sizing:border-box}
+    *{ -webkit-print-color-adjust:exact!important; print-color-adjust:exact!important; color-adjust:exact!important; }
     body{font-family:Arial,Helvetica,sans-serif;margin:0;color:#111;background:#fff;font-size:12px}
     .sheet{width:186mm;margin:0 auto}
     .hdr{display:flex;align-items:center;gap:14px;border-bottom:3px solid ${DB.theme?DB.theme.primary:'#15803d'};padding-bottom:10px;margin-bottom:14px}
@@ -4391,12 +4486,15 @@ function printReceiptA4(paymentId){
       ['Matricule', esc(s.matricule||'—')],
       ['Tuteur', esc(s.guardian_name||'—')],
       ['Motif du paiement', esc(p.label||'')],
+      ...(paymentMonths(p).length?[['Mois de scolarité payé(s)', `<b>${esc(paymentMonthsLabel(p))}</b>`]]:[]),
       ['Date du paiement', esc(p.date||'')],
       ['Encaissé par', `${esc(p.recorded_by_name||'')} (${roleLabel(p.recorded_role||'')})`],
       ['Statut', `<b>${st}</b>`]]))}
     <div style="background:${DB.theme?DB.theme.primary:'#15803d'};color:#fff;text-align:center;font-size:24px;font-weight:800;border-radius:8px;padding:16px;margin:16px 0">
       ${fmtGNF(p.amount)}</div>`;
-  const txt = `*${DB.centerName||'AGM'}* — Reçu N° ${p.receipt_no}\nÉlève : ${s.first_name} ${s.last_name} (${s.matricule})\nMotif : ${p.label}\nDate : ${p.date}\nMontant : ${fmtGNF(p.amount)}\nStatut : ${st}`;
+  const txt = `*${DB.centerName||'AGM'}* — Reçu N° ${p.receipt_no}\nÉlève : ${s.first_name} ${s.last_name} (${s.matricule})\nMotif : ${p.label}`
+    + (paymentMonths(p).length?`\nMois payé(s) : ${paymentMonthsLabel(p)}`:'')
+    + `\nDate de paiement : ${p.date}\nMontant : ${fmtGNF(p.amount)}\nStatut : ${st}`;
   printA4('Reçu de paiement', body, { subtitle:'Reçu N° '+(p.receipt_no||''),
     shareText:txt, phone:s.guardian_phone, sgLeft:'Le payeur', sgRight:'Pour le markaz', image:true });
 }
@@ -4405,7 +4503,9 @@ function whatsappReceipt(paymentId){
   const s = DB.students.find(x=>x.id===p.student_id)||{};
   const st = p.status==='approved'?'validé':'en attente';
   sendToGuardian(s.guardian_phone,
-    `*${DB.centerName||'AGM'}* — Reçu N° ${p.receipt_no}\nÉlève : ${s.first_name} ${s.last_name}\nMotif : ${p.label}\nDate : ${p.date}\nMontant : ${fmtGNF(p.amount)}\nStatut : ${st}\n\nMerci.`);
+    `*${DB.centerName||'AGM'}* — Reçu N° ${p.receipt_no}\nÉlève : ${s.first_name} ${s.last_name}\nMotif : ${p.label}`
+    + (paymentMonths(p).length?`\nMois payé(s) : ${paymentMonthsLabel(p)}`:'')
+    + `\nDate de paiement : ${p.date}\nMontant : ${fmtGNF(p.amount)}\nStatut : ${st}\n\nMerci.`);
 }
 
 /* ---- Impression du registre des paiements (onglet Paiements) ---- */
@@ -4417,7 +4517,7 @@ function printPaiementsList(){
   const rows = list.map(p=>{
     const s = DB.students.find(x=>x.id===p.student_id)||{};
     return [p.date, esc(p.receipt_no||'—'), esc((s.first_name||'')+' '+(s.last_name||'')),
-      esc(s.matricule||'—'), esc(p.label||''), p.for_month?esc(monthYearLabel(p.for_month)):'—',
+      esc(s.matricule||'—'), esc(p.label||''), paymentMonths(p).length?esc(paymentMonthsLabel(p)):'—',
       p.status==='approved'?'Validé':(p.status==='pending'?'Attente':'Rejeté'),
       `<span class="r b">${fmtGNF(p.amount)}</span>`];
   });
@@ -4640,15 +4740,24 @@ function openPlanningForm(studentId){
       <div class="fg"><label class="fl">Lettre en cours</label><select class="fi" id="plHIdx">${hOpts}</select></div>
     </div>
     <div id="plCoran" style="display:${p.level==='coran'?'block':'none'}">
-      <div class="fg"><label class="fl">Sourate de départ</label><select class="fi" id="plSourate">${sOpts}</select></div>
+      <div class="fl" style="margin:6px 0 6px;font-weight:700">📖 Nouvelle leçon</div>
+      <div class="fg"><label class="fl">Sourate</label><select class="fi" id="plSourate">${sOpts}</select></div>
       <div class="fg2">
-        <div class="fg"><label class="fl">Verset de départ</label><input type="number" min="1" class="fi" id="plAyah" value="${p.ayah}"></div>
+        <div class="fg"><label class="fl">Verset — début de cours</label><input type="number" min="1" class="fi" id="plAyah" value="${p.ayah}"></div>
+        <div class="fg"><label class="fl">Verset — fin de cours</label><input type="number" min="1" class="fi" id="plAyahEnd" value="${p.ayah_end||''}" placeholder="auto (versets/jour)"></div>
+      </div>
+      <div class="fg2">
         <div class="fg"><label class="fl">Djouzou en cours</label><input type="number" min="1" max="30" class="fi" id="plJuz" value="${p.juz}"></div>
+        <div class="fg"><label class="fl">Versets/jour (si pas de verset de fin ci-dessus)</label><input type="number" min="1" class="fi" id="plVpd" value="${p.versets_per_day}"></div>
       </div>
+
+      <div class="fl" style="margin:14px 0 6px;font-weight:700">🔁 Ancienne leçon (révision)</div>
+      <div class="fg"><label class="fl">Sourate</label><select class="fi" id="plRevSourate">${SOURATES.map((x,i)=>`<option value="${i+1}" ${ (p.rev_sourate||p.sourate)===i+1?'selected':''}>${i+1}. ${x[0]} (${x[1]} v.)</option>`).join('')}</select></div>
       <div class="fg2">
-        <div class="fg"><label class="fl">Nouvelle leçon (versets/jour)</label><input type="number" min="1" class="fi" id="plVpd" value="${p.versets_per_day}"></div>
-        <div class="fg"><label class="fl">Ancienne leçon — révision (versets/jour)</label><input type="number" min="0" class="fi" id="plRpd" value="${p.revision_per_day}"></div>
+        <div class="fg"><label class="fl">Verset — début de cours</label><input type="number" min="1" class="fi" id="plRevAyahFrom" value="${p.rev_ayah_from||''}" placeholder="ex. 1"></div>
+        <div class="fg"><label class="fl">Verset — fin de cours</label><input type="number" min="1" class="fi" id="plRevAyahTo" value="${p.rev_ayah_to||''}" placeholder="ex. 5"></div>
       </div>
+      <div class="fg"><label class="fl">Versets/jour (si pas de portion précise ci-dessus)</label><input type="number" min="0" class="fi" id="plRpd" value="${p.revision_per_day}"></div>
     </div>
     <div style="display:flex;gap:8px;margin-top:14px">
       <button class="fb fb-gold" style="flex:1" onclick="savePlanning('${s.id}')">💾 Enregistrer le programme</button>
@@ -4668,9 +4777,22 @@ function savePlanning(studentId){
   } else {
     p.sourate = Number(document.getElementById('plSourate').value)||1;
     p.ayah = Math.max(1, Number(document.getElementById('plAyah').value)||1);
+    const ayahEndRaw = document.getElementById('plAyahEnd').value;
+    p.ayah_end = ayahEndRaw ? Math.max(p.ayah, Number(ayahEndRaw)||p.ayah) : null;
     p.juz = Math.min(30, Math.max(1, Number(document.getElementById('plJuz').value)||1));
-    p.versets_per_day = Math.max(1, Number(document.getElementById('plVpd').value)||1);
-    p.revision_per_day = Math.max(0, Number(document.getElementById('plRpd').value)||0);
+    p.versets_per_day = p.ayah_end ? (p.ayah_end - p.ayah + 1) : Math.max(1, Number(document.getElementById('plVpd').value)||1);
+
+    p.rev_sourate = Number(document.getElementById('plRevSourate').value)||p.sourate;
+    const revFromRaw = document.getElementById('plRevAyahFrom').value;
+    const revToRaw = document.getElementById('plRevAyahTo').value;
+    if (revFromRaw && revToRaw){
+      p.rev_ayah_from = Math.max(1, Number(revFromRaw)||1);
+      p.rev_ayah_to = Math.max(p.rev_ayah_from, Number(revToRaw)||p.rev_ayah_from);
+      p.revision_per_day = p.rev_ayah_to - p.rev_ayah_from + 1;
+    } else {
+      p.rev_ayah_from = null; p.rev_ayah_to = null;
+      p.revision_per_day = Math.max(0, Number(document.getElementById('plRpd').value)||0);
+    }
     const s = DB.students.find(x=>x.id===studentId);
     if (s) s.current_juz = p.juz;   // harmonie avec l'onglet Djouzou
   }
@@ -4703,7 +4825,9 @@ function renderLecture(){
       ? (p.hourouf_index>0 ? `Lettres 1 → ${p.hourouf_index}` : '—')
       : rangeOld
         ? `${SOURATES[rangeOld.sourate-1][0]} ${rangeOld.from}${rangeOld.to>rangeOld.from?'-'+rangeOld.to:''}`
-        : `${p.revision_per_day} verset(s) de révision`;
+        : (p.rev_ayah_from && p.rev_ayah_to)
+          ? `${SOURATES[(p.rev_sourate||p.sourate)-1][0]} ${p.rev_ayah_from}-${p.rev_ayah_to}`
+          : `${p.revision_per_day} verset(s) de révision`;
     return `<tr>
       <td><div style="display:flex;align-items:center;gap:9px">${photoThumb(s,34)}<div>
         ${esc(s.first_name+' '+s.last_name)}
@@ -5090,7 +5214,10 @@ function printPlanning(studentId){
       ['Position actuelle', p.level==='hourouf'?('Lettre '+HOUROUF[p.hourouf_index]+' — '+(p.hourouf_index+1)+'/'+HOUROUF.length):rangeLabel(lessonRange(p))],
       ['Djouzou en cours', p.level==='hourouf'?'—':String(p.juz)],
       ['Nouvelle leçon', p.level==='hourouf'?'1 lettre/jour':(p.versets_per_day+' verset(s) par jour')],
-      ['Ancienne leçon (révision)', p.level==='hourouf'?'Lettres acquises':(p.revision_per_day+' verset(s) par jour')]]))
+      ['Ancienne leçon (révision)', p.level==='hourouf'?'Lettres acquises':
+        (p.rev_ayah_from&&p.rev_ayah_to
+          ? SOURATES[(p.rev_sourate||p.sourate)-1][0]+' '+p.rev_ayah_from+'-'+p.rev_ayah_to
+          : (p.revision_per_day+' verset(s) par jour'))]]))
     + `<div class="sec">Dernières restitutions</div>`
     + a4Table(['Date','Portion','Résultat'], recs.map(r=>[r.date, esc(r.label), r.ok?'Validée':'Reprise'])),
     { subtitle:esc(s.first_name+' '+s.last_name),
@@ -5293,7 +5420,7 @@ function finBody(){
     + a4Table(['Date','N° reçu','Élève','Motif','Mois concerné','Montant'],
         pays.map(p=>{ const s=DB.students.find(x=>x.id===p.student_id)||{};
           return [p.date, esc(p.receipt_no||'—'), esc((s.first_name||'')+' '+(s.last_name||'')), esc(p.label||''),
-            p.for_month?esc(monthYearLabel(p.for_month)):'—',
+            paymentMonths(p).length?esc(paymentMonthsLabel(p)):'—',
             `<span class="r b">${fmtGNF(p.amount)}</span>`]; }),
         ['','','','','TOTAL',`<span class="b">${fmtGNF(enc)}</span>`])
     + `<div class="sec">Dépenses par catégorie</div>`
@@ -5787,10 +5914,16 @@ async function openReadingImage(studentId, type){
                 count:(manualRange.to-manualRange.from+1), clamped:false, total:SOURATES[manualRange.sourate-1][1] };
     title = type==='old' ? 'Ancienne leçon — révision' : 'Nouvelle leçon';
   } else if (type==='old'){
-    const n = Math.max(0, Number(p.revision_per_day)||0);
-    if (!n){ toast("Aucune ancienne leçon : définissez un nombre de versets de révision."); return; }
-    portion = previousPortion(p, n);
-    if (!portion){ toast("Pas encore d'ancienne leçon à réviser."); return; }
+    if (p.rev_ayah_from && p.rev_ayah_to){
+      const revS = p.rev_sourate || p.sourate;
+      portion = { s:revS, from:p.rev_ayah_from, to:p.rev_ayah_to,
+                  count:(p.rev_ayah_to-p.rev_ayah_from+1), clamped:false, total:SOURATES[revS-1][1] };
+    } else {
+      const n = Math.max(0, Number(p.revision_per_day)||0);
+      if (!n){ toast("Aucune ancienne leçon : définissez un nombre de versets de révision."); return; }
+      portion = previousPortion(p, n);
+      if (!portion){ toast("Pas encore d'ancienne leçon à réviser."); return; }
+    }
     title = 'Ancienne leçon — révision';
   } else {
     portion = portionInSourate(p.sourate, p.ayah, todayQuota(studentId));
@@ -5841,6 +5974,7 @@ function showHouroufPage(letters, title, s){
   w.document.write(`<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>${esc(title)}</title>
   <link href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=DM+Sans:wght@400;700;800&display=swap" rel="stylesheet">
   <style>
+    *{ -webkit-print-color-adjust:exact!important; print-color-adjust:exact!important; color-adjust:exact!important; }
     @page{size:A4;margin:12mm}
     body{margin:0;padding:18px;background:#eef1ef;font-family:'DM Sans',Arial,sans-serif}
     .top{background:${primary};color:#fff;border-radius:12px;padding:14px 20px;margin:0 auto 16px;max-width:190mm;direction:ltr}
@@ -5871,6 +6005,7 @@ function showReadingWindow(svg, title, student){
   const msg = `${DB.centerName||'AGM'} — ${title}`;
   w.document.write(`<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>${esc(title)}</title>
   <style>
+    *{ -webkit-print-color-adjust:exact!important; print-color-adjust:exact!important; color-adjust:exact!important; }
     @page{size:A4;margin:10mm}
     body{margin:0;padding:18px;background:#eef1ef;font-family:Arial,Helvetica,sans-serif;text-align:center}
     img{max-width:100%;height:auto;background:#fff;border-radius:10px;box-shadow:0 6px 22px rgba(0,0,0,.14)}
@@ -6166,6 +6301,7 @@ async function openQuranPage(portion, title, student, extra){
   <title>${esc(title)}</title>
   <link href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=DM+Sans:wght@400;700;800&display=swap" rel="stylesheet">
   <style>
+    *{ -webkit-print-color-adjust:exact!important; print-color-adjust:exact!important; color-adjust:exact!important; }
     @page{size:A4;margin:12mm}
     body{margin:0;padding:18px;background:#eef1ef;font-family:'DM Sans',Arial,sans-serif}
     .top{background:${primary};color:#fff;border-radius:12px;padding:14px 20px;margin:0 auto 16px;max-width:190mm;
@@ -6729,24 +6865,6 @@ function uploadAllPendingPhotos(){
   if (!cloudLinked() || !DB) return;
   (DB.students||[]).forEach(s => { if (s.photo && s.photo.indexOf('data:') === 0) queuePhotoUpload('students', s.id); });
   (DB.users||[]).forEach(u => { if (u.photo && u.photo.indexOf('data:') === 0) queuePhotoUpload('users', u.id); });
-  Object.keys(DB.studentAuth||{}).forEach(sid => queueBioImageUpload(sid));
-}
-
-/** Photo de vérification (pointage) : envoyée vers Firebase Storage (fichier séparé,
- *  avec ses propres règles d'accès) au lieu d'être stockée en base64 dans la base de
- *  données — évite qu'elle ne se retrouve embarquée dans un export/sauvegarde JSON. */
-function queueBioImageUpload(studentId){
-  if (!cloudLinked()) return; // sera retenté à la prochaine reconnexion ; le cache local reste utilisable entre-temps
-  const auth = DB.studentAuth && DB.studentAuth[studentId];
-  if (!auth || !auth.bioImage || auth.bioImage.indexOf('data:') !== 0) return;
-  uploadPhotoToStorage('bio', studentId, auth.bioImage).then(url => {
-    if (!url) return;
-    const fresh = DB.studentAuth && DB.studentAuth[studentId];
-    if (fresh && fresh.bioImage && fresh.bioImage.indexOf('data:') === 0){
-      fresh.bioImage = url;
-      saveDB();
-    }
-  });
 }
 
 function pickStudentPhoto(evt){
@@ -7767,13 +7885,18 @@ function copyAccessCode(){
 }
 
 function exportData(){
-  const blob = new Blob([JSON.stringify(DB, null, 2)], { type: 'application/json' });
+  // Les données biométriques (studentAuth : PIN, signatures faciales, empreintes)
+  // ne sont JAMAIS incluses dans la sauvegarde : un fichier JSON se partage
+  // facilement (email, clé USB) et ne doit pas transporter ces informations.
+  const clean = {};
+  Object.keys(DB).forEach(k => { if (k !== 'studentAuth') clean[k] = DB[k]; });
+  const blob = new Blob([JSON.stringify(clean, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = 'agcm-sauvegarde-' + todayStr() + '.json';
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
-  toast('Sauvegarde téléchargée.');
+  toast('Sauvegarde téléchargée (sans données biométriques).');
 }
 
 function importData(evt){
@@ -7784,7 +7907,9 @@ function importData(evt){
     try {
       const data = JSON.parse(reader.result);
       if (!confirm('Remplacer toutes les données actuelles par cette sauvegarde ?')) return;
+      const keepAuth = DB && DB.studentAuth;   // biométrie : locale à l'appareil, préservée
       DB = data;
+      DB.studentAuth = keepAuth || {};
       ['users','teachers','students','juz','progressions','evaluations','transactions','payments','purchases','salaries','consumables','stockMovements','archives']
         .forEach(function(k){ if (!Array.isArray(DB[k])) DB[k] = []; });
       if (!DB.juz || !DB.juz.length) DB.juz = JUZ_NAMES.map((n,i)=>({ number:i+1, name_fr:n }));
