@@ -1877,6 +1877,38 @@ function openStudentForm(){
       <div class="fg"><label class="fl">Date d'inscription</label><input class="fi" type="date" id="stEnroll" value="${todayStr()}"></div>
       <div class="fg"><label class="fl">Djouzou de départ</label><select class="fi" id="stStartJuz">${juzOrdered().map(j=>`<option value="${j.number}" ${j.number===firstJuz()?'selected':''}>Djouzou ${j.number} — ${esc(j.name_fr)}</option>`).join('')}</select></div>
     </div>
+
+    <!-- Niveau de départ : Hourouf (alphabet) ou Coran avec la sourate exacte -->
+    <div style="background:rgba(212,160,60,.05);border:1px solid rgba(212,160,60,.2);border-radius:11px;padding:12px 13px;margin-bottom:12px">
+      <div class="fl" style="font-weight:700;margin-bottom:8px">📚 Niveau de départ</div>
+      <div class="fg"><label class="fl">L'élève commence par</label>
+        <select class="fi" id="stLevel" onchange="stLevelToggle()">
+          <option value="coran">📖 Coran — mémorisation</option>
+          <option value="hourouf">🔤 Hourouf — alphabet arabe</option>
+        </select>
+      </div>
+      <div id="stHouroufBox" style="display:none">
+        <div class="fg"><label class="fl">Lettre de départ</label>
+          <select class="fi" id="stHIdx">${HOUROUF.map((h,i)=>`<option value="${i}">${i+1}. ${h}</option>`).join('')}</select>
+        </div>
+      </div>
+      <div id="stCoranBox">
+        <div class="fg"><label class="fl">Sourate de départ</label>
+          <select class="fi" id="stSourate" onchange="stSourateChange()">
+            ${SOURATES.map((x,i)=>`<option value="${i+1}" ${(i+1)===(sourateOrderUp()?SOURATES.length:1)?'selected':''}>${i+1}. ${x[0]} (${x[1]} v.)</option>`).join('')}
+          </select>
+        </div>
+        <div class="fg2">
+          <div class="fg"><label class="fl">Verset de départ</label>
+            <input class="fi" type="number" min="1" id="stAyah" value="1">
+          </div>
+          <div class="fg"><label class="fl">Versets par jour</label>
+            <input class="fi" type="number" min="1" id="stVpd" value="3">
+          </div>
+        </div>
+        <div style="font-size:11.5px;color:var(--muted)">Sens d'apprentissage actuel : ${esc(sourateOrderLabel())}. Le programme complet reste modifiable dans l'onglet Planning.</div>
+      </div>
+    </div>
     <div class="fg2">
       <div class="fg"><label class="fl">Frais d'inscription (GNF)</label><input class="fi" type="number" id="stFee" value="150000"></div>
       <div class="fg"><label class="fl">Mensualité (GNF)</label><input class="fi" type="number" id="stMonthly" value="40000"></div>
@@ -1906,6 +1938,23 @@ function openStudentForm(){
       <button class="fb fb-gold" style="flex:1" onclick="saveStudent()">💾 Enregistrer</button>
       <button class="fb fb-ghost" onclick="closeModal()">Annuler</button>
     </div>`);
+}
+
+function stLevelToggle(){
+  const v = (document.getElementById('stLevel')||{}).value;
+  const h = document.getElementById('stHouroufBox');
+  const c = document.getElementById('stCoranBox');
+  if (h) h.style.display = v==='hourouf' ? 'block' : 'none';
+  if (c) c.style.display = v==='hourouf' ? 'none'  : 'block';
+}
+/** Ramène le verset de départ dans les limites de la sourate choisie. */
+function stSourateChange(){
+  const sel = document.getElementById('stSourate');
+  const ay  = document.getElementById('stAyah');
+  if (!sel || !ay) return;
+  const max = SOURATES[clampSourate(sel.value)-1][1];
+  if (Number(ay.value) > max) ay.value = 1;
+  ay.max = max;
 }
 
 function saveStudent(){
@@ -1938,6 +1987,27 @@ function saveStudent(){
   };
   PENDING_PHOTO = null;
   DB.students.push(student);
+
+  // Programme d'apprentissage créé directement à l'inscription :
+  // soit Hourouf (alphabet) avec la lettre de départ, soit Coran
+  // avec la sourate et le verset exacts où l'élève commence.
+  const lvlEl = document.getElementById('stLevel');
+  if (lvlEl){
+    const pl = getPlanning(student.id);
+    pl.level = lvlEl.value === 'hourouf' ? 'hourouf' : 'coran';
+    if (pl.level === 'hourouf'){
+      pl.hourouf_index = Number((document.getElementById('stHIdx')||{}).value) || 0;
+    } else {
+      pl.sourate = clampSourate((document.getElementById('stSourate')||{}).value);
+      const maxAyah = SOURATES[pl.sourate-1][1];
+      pl.ayah = Math.min(maxAyah, Math.max(1, Number((document.getElementById('stAyah')||{}).value) || 1));
+      pl.versets_per_day = Math.max(1, Number((document.getElementById('stVpd')||{}).value) || 3);
+      pl.ayah_end = null;
+      pl.rev_sourate = pl.sourate;
+    }
+    pl.juz = startJuz;
+  }
+
   saveDB();
   if (student.photo) queuePhotoUpload('students', student.id);
   closeModal();
@@ -2856,41 +2926,95 @@ function paymentStatusBadge(p){
   return '<span class="badge '+st[0]+'">'+st[1]+'</span>';
 }
 
-function renderPaiements(){
+/* ---- Recherche d'élève dans l'onglet Paiements ---- */
+let paymentSearch = '';
+let paymentSearchTimer = null;
+function onPaymentSearchInput(val){
+  paymentSearch = val;
+  clearTimeout(paymentSearchTimer);
+  paymentSearchTimer = setTimeout(renderPaiementsTable, 120);
+}
+/** Liste des paiements visibles, filtrée par la recherche (élève, matricule,
+ *  n° de reçu ou motif). */
+function paiementsFilteredList(){
   const u = currentUser();
   let list = DB.payments.slice().sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   if (isComptable()) list = list.filter(p=>p.recorded_by===u.id || p.status==='approved');
-
+  const q = (paymentSearch||'').trim().toLowerCase();
+  if (q){
+    list = list.filter(p=>{
+      const s = DB.students.find(x=>x.id===p.student_id);
+      const hay = [
+        s ? s.first_name+' '+s.last_name : '',
+        s ? s.matricule : '',
+        s ? (s.guardian_name||'') : '',
+        p.receipt_no||'',
+        p.label||''
+      ].join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+  }
+  return list;
+}
+function paiementRowHtml(p){
+  const s = DB.students.find(x=>x.id===p.student_id);
+  return `<tr>
+    <td style="font-family:'DM Mono',monospace;color:var(--gold-light)">${esc(p.receipt_no)}</td>
+    <td>${s?esc(s.first_name+' '+s.last_name):'—'}</td>
+    <td>${esc(p.label)}</td>
+    <td>${paymentMonths(p).length?esc(paymentMonthsLabel(p)):'<span style="color:var(--muted)">—</span>'}</td>
+    <td>${p.date}</td>
+    <td style="font-weight:700">${fmtGNF(p.amount)}</td>
+    <td>${paymentStatusBadge(p)}</td>
+    <td style="text-align:right;white-space:nowrap">
+      ${canEditRecords()?`<button class="fb fb-ghost fb-sm" onclick="openEditPayment('${p.id}')">✏️</button>`:''}
+      <button class="fb fb-ghost fb-sm" onclick="printReceiptA4('${p.id}')">🧾 Reçu PDF A4</button>
+      <button class="fb fb-green fb-sm" onclick="whatsappReceipt('${p.id}')">📲 Envoyer</button>
+      ${isFondateur() && p.status==='pending' ? `<button class="fb fb-green fb-sm" onclick="approvePayment('${p.id}')">✔️ Approuver</button><button class="fb fb-danger fb-sm" onclick="rejectPayment('${p.id}')">✖️</button>`:''}
+    </td>
+  </tr>`;
+}
+/** Ne redessine que le tableau — jamais la barre de recherche — pour que
+ *  la saisie reste fluide même sur une longue liste de paiements. */
+function renderPaiementsTable(){
+  const list = paiementsFilteredList();
+  const shown = list.slice(0,60);
+  const total = list.reduce((a,x)=>a+Number(x.amount||0),0);
+  const sub = document.getElementById('paiementsCountSub');
+  if (sub){
+    sub.textContent = list.length + ' paiement(s)'
+      + (paymentSearch.trim() ? ' trouvé(s)' : '')
+      + ' — total ' + fmtGNF(total)
+      + (list.length>60 ? ' (60 plus récents affichés)' : '');
+  }
+  const wrap = document.getElementById('paiementsTableWrap');
+  if (!wrap) return;
+  const rows = shown.map(paiementRowHtml).join('');
+  wrap.innerHTML = rows
+    ? `<table><thead><tr><th>Reçu</th><th>Élève</th><th>Motif</th><th>Mois concerné</th><th>Date</th><th>Montant</th><th>Statut</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : (paymentSearch.trim()
+        ? `<div class="empty-state"><div class="em">🔎</div>Aucun paiement ne correspond à « ${esc(paymentSearch)} ».</div>`
+        : `<div class="empty-state"><div class="em">🧾</div>Aucun paiement enregistré.</div>`);
+}
+function renderPaiements(){
   const pendingCount = DB.payments.filter(p=>p.status==='pending').length;
-
-  const rows = list.slice(0,60).map(p=>{
-    const s = DB.students.find(x=>x.id===p.student_id);
-    return `<tr>
-      <td style="font-family:'DM Mono',monospace;color:var(--gold-light)">${esc(p.receipt_no)}</td>
-      <td>${s?esc(s.first_name+' '+s.last_name):'—'}</td>
-      <td>${esc(p.label)}</td>
-      <td>${paymentMonths(p).length?esc(paymentMonthsLabel(p)):'<span style="color:var(--muted)">—</span>'}</td>
-      <td>${p.date}</td>
-      <td style="font-weight:700">${fmtGNF(p.amount)}</td>
-      <td>${paymentStatusBadge(p)}</td>
-      <td style="text-align:right;white-space:nowrap">
-        ${canEditRecords()?`<button class="fb fb-ghost fb-sm" onclick="openEditPayment('${p.id}')">✏️</button>`:''}
-        <button class="fb fb-ghost fb-sm" onclick="printReceiptA4('${p.id}')">🧾 Reçu PDF A4</button>
-        <button class="fb fb-green fb-sm" onclick="whatsappReceipt('${p.id}')">📲 Envoyer</button>
-        ${isFondateur() && p.status==='pending' ? `<button class="fb fb-green fb-sm" onclick="approvePayment('${p.id}')">✔️ Approuver</button><button class="fb fb-danger fb-sm" onclick="rejectPayment('${p.id}')">✖️</button>`:''}
-      </td>
-    </tr>`;
-  }).join('');
-
   document.getElementById('pageContent').innerHTML = `
-    ${pageHead('Paiements élèves', (isFondateur()&&pendingCount ? pendingCount+' paiement(s) en attente de votre approbation' : 'Scolarité, inscriptions et autres paiements'),
+    ${pageHead('Paiements élèves',
+      (isFondateur()&&pendingCount ? pendingCount+' paiement(s) en attente de votre approbation — <span id="paiementsCountSub"></span>' : '<span id="paiementsCountSub"></span>'),
       `<button class="fb fb-gold" onclick="openPaymentForm()">+ Nouveau paiement</button> `+
       `<button class="fb fb-ghost" onclick="openDettesModal()">📋 Dettes de scolarité</button> `+printBtn('printPaiementsList()'))}
     ${filterBar('renderPaiements()')}
-    <div class="table-wrap">
-      ${rows ? `<table><thead><tr><th>Reçu</th><th>Élève</th><th>Motif</th><th>Mois concerné</th><th>Date</th><th>Montant</th><th>Statut</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
-      : `<div class="empty-state"><div class="em">🧾</div>Aucun paiement enregistré.</div>`}
-    </div>`;
+    <div class="search-bar" style="gap:8px;flex-wrap:wrap">
+      <input class="fi" id="paiementSearchInput" placeholder="🔎 Rechercher un élève par nom, matricule, tuteur, n° de reçu ou motif…"
+             value="${esc(paymentSearch)}" oninput="onPaymentSearchInput(this.value)">
+      ${paymentSearch.trim()?`<button class="fb fb-ghost" onclick="clearPaymentSearch()">✕ Effacer</button>`:''}
+    </div>
+    <div class="table-wrap" id="paiementsTableWrap"></div>`;
+  renderPaiementsTable();
+}
+function clearPaymentSearch(){
+  paymentSearch = '';
+  renderPaiements();
 }
 
 function currentMonthYM(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
@@ -3386,7 +3510,10 @@ function viewStudentAchats(studentId){
       <td style="text-align:right;font-family:'DM Mono',monospace">${fmtGNF(pu)}</td>
       <td style="text-align:right;font-weight:800;font-family:'DM Mono',monospace;color:#f0c975">${fmtGNF(pu*qty)}</td>
       <td style="text-align:center;font-size:10.5px;color:var(--muted)">${x.date||''}</td>
-      <td><button class="fb fb-danger fb-sm" onclick="deleteAchat('${x.id}','${studentId}')">✕</button></td>
+      <td style="white-space:nowrap">
+        <button class="fb fb-ghost fb-sm" onclick="openEditAchat('${x.id}','${studentId}')">✏️</button>
+        <button class="fb fb-danger fb-sm" onclick="deleteAchat('${x.id}','${studentId}')">✕</button>
+      </td>
     </tr>`;
   }).join('');
 
@@ -3775,6 +3902,89 @@ function saveEditDepot(id, studentId){
   d.edited_at = Date.now();
   saveDB(); closeModal();
   toast('Dépôt modifié : ' + fmtGNF(amount));
+  viewStudentAchats(studentId);
+}
+
+/* ================================================================
+   MODIFICATION D'UNE LIGNE D'ACHAT — désignation, qté, PU et date
+   ================================================================ */
+function openEditAchat(id, studentId){
+  const a = DB.purchases.find(x=>x.id===id && x.type==='achat'); if(!a) return;
+  const s = DB.students.find(x=>x.id===studentId);
+  // Solde disponible SANS cette ligne : c'est le plafond de la nouvelle valeur.
+  const ancien = (Number(a.amount)||0)*(Number(a.quantity)||1);
+  const dispo  = studentFundBalance(studentId) + ancien;
+  openModal(`
+    <h3>✏️ Modifier l'achat</h3>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:14px">
+      Élève : <b>${s?esc(s.first_name+' '+s.last_name):'—'}</b>${s?` <span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--gold-light)">— ${esc(s.matricule)}</span>`:''}
+    </p>
+    <div class="fg"><label class="fl">Désignation *</label>
+      <input class="fi" id="eac_item" value="${esc(a.item||'')}" placeholder="Ex : cahier, savon, tenue…">
+    </div>
+    <div class="fg2">
+      <div class="fg"><label class="fl">Quantité *</label>
+        <input class="fi" type="number" min="1" id="eac_qty" value="${Number(a.quantity)||1}" oninput="calcEditAchat(${dispo})">
+      </div>
+      <div class="fg"><label class="fl">Prix unitaire (GNF) *</label>
+        <input class="fi" type="number" min="0" id="eac_pu" value="${Number(a.amount)||0}" oninput="calcEditAchat(${dispo})">
+      </div>
+    </div>
+    <div class="fg"><label class="fl">Date de l'achat</label>
+      <input class="fi" type="date" id="eac_date" value="${esc(a.date||todayStr())}">
+    </div>
+    <div style="background:rgba(212,160,60,.07);border:1px solid rgba(212,160,60,.22);border-radius:10px;padding:11px 13px;margin:4px 0 12px">
+      <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:4px">
+        <span style="color:var(--muted)">Total de cette ligne</span>
+        <b id="eac_total" style="font-family:'DM Mono',monospace">${fmtGNF(ancien)}</b>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:12.5px">
+        <span style="color:var(--muted)">Reste en dépôt après modification</span>
+        <b id="eac_reste" style="font-family:'DM Mono',monospace">${fmtGNF(dispo-ancien)}</b>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <button class="fb fb-gold" style="flex:1" onclick="saveEditAchat('${a.id}','${studentId}')">💾 Enregistrer</button>
+      <button class="fb fb-ghost" onclick="closeModal();viewStudentAchats('${studentId}')">Annuler</button>
+    </div>`);
+  calcEditAchat(dispo);
+}
+function calcEditAchat(dispo){
+  const qty = Number((document.getElementById('eac_qty')||{}).value)||0;
+  const pu  = Number((document.getElementById('eac_pu')||{}).value)||0;
+  const tot = qty*pu;
+  const tEl = document.getElementById('eac_total');
+  const rEl = document.getElementById('eac_reste');
+  if (tEl) tEl.textContent = fmtGNF(tot);
+  if (rEl){
+    const reste = dispo - tot;
+    rEl.textContent = fmtGNF(reste);
+    rEl.style.color = reste < 0 ? '#fca5a5' : '#86efac';
+  }
+}
+function saveEditAchat(id, studentId){
+  const a = DB.purchases.find(x=>x.id===id); if(!a) return;
+  const item = ((document.getElementById('eac_item')||{}).value||'').trim();
+  const qty  = Number((document.getElementById('eac_qty')||{}).value)||0;
+  const pu   = Number((document.getElementById('eac_pu')||{}).value)||0;
+  if (!item){ toast('La désignation est obligatoire.'); return; }
+  if (qty<1){ toast('Quantité invalide.'); return; }
+  if (pu<=0){ toast('Prix unitaire invalide.'); return; }
+  // Le nouveau total ne doit pas dépasser ce que le tuteur a déposé.
+  const ancien = (Number(a.amount)||0)*(Number(a.quantity)||1);
+  const dispo  = studentFundBalance(studentId) + ancien;
+  const nouveau = qty*pu;
+  if (nouveau > dispo){
+    toast('Solde insuffisant : '+fmtGNF(dispo)+' disponible pour cette ligne, besoin de '+fmtGNF(nouveau)+'.');
+    return;
+  }
+  a.item = item;
+  a.quantity = qty;
+  a.amount = pu;
+  a.date = ((document.getElementById('eac_date')||{}).value) || a.date || todayStr();
+  a.edited_at = Date.now();
+  saveDB(); closeModal();
+  toast('Achat modifié : '+fmtGNF(nouveau));
   viewStudentAchats(studentId);
 }
 
