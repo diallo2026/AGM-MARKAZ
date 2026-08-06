@@ -456,6 +456,8 @@ html[dir="rtl"] .fi{text-align:right}
         <div style="min-width:0"><div class="un" id="userNameLbl">—</div><div class="ur" id="userRoleLbl">—</div></div>
       </div>
       <button class="fb fb-ghost fb-sm" style="width:100%" onclick="doLogout()">🚪 Déconnexion</button>
+      <div style="text-align:center;font-size:10px;color:var(--muted);margin-top:8px;cursor:pointer" onclick="forcerMiseAJour()" title="Toucher pour forcer la mise à jour">
+        v<span id="appVersionLbl">—</span> · 🔄 mettre à jour</div>
     </div>
   </aside>
 
@@ -1392,9 +1394,38 @@ function boot(){
   }
 
   if ('serviceWorker' in navigator){
-    navigator.serviceWorker.register('./sw.js').catch(()=>{});
+    navigator.serviceWorker.register('./sw.js').then(function(reg){
+      // Vérifier immédiatement s'il existe une version plus récente,
+      // puis toutes les 30 minutes et à chaque retour sur l'appli.
+      try{ reg.update(); }catch(e){}
+      setInterval(function(){ try{ reg.update(); }catch(e){} }, 30*60*1000);
+      document.addEventListener('visibilitychange', function(){
+        if (!document.hidden){ try{ reg.update(); }catch(e){} }
+      });
+      // Nouvelle version installée : on l'active et on recharge une seule fois.
+      reg.addEventListener('updatefound', function(){
+        const nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener('statechange', function(){
+          if (nw.state === 'installed' && navigator.serviceWorker.controller){
+            try{ nw.postMessage({type:'SKIP_WAITING'}); }catch(e){}
+          }
+        });
+      });
+      if (reg.waiting){ try{ reg.waiting.postMessage({type:'SKIP_WAITING'}); }catch(e){} }
+    }).catch(()=>{});
+    let agmReloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', function(){
+      if (agmReloaded) return;
+      agmReloaded = true;
+      location.reload();
+    });
   }
 }
+window.addEventListener('DOMContentLoaded', function(){
+  const vl = document.getElementById('appVersionLbl');
+  if (vl) vl.textContent = AGM_VERSION;
+});
 window.addEventListener('DOMContentLoaded', boot);
 
 /* =====================================================================
@@ -1505,6 +1536,34 @@ function pageHead(title, sub, actionsHtml){
 }
 
 /* =====================================================================
+   VERSION DE L'APPLICATION
+   Sert à vérifier, depuis le téléphone, que la dernière correction est
+   bien installée : si le numéro affiché dans Réglages ne change pas
+   après un déploiement, c'est que l'ancienne version est encore en
+   cache sur l'appareil.
+   ===================================================================== */
+const AGM_VERSION = '2026.08.06-4';
+
+/** Supprime tout le cache local de l'appli et recharge la dernière version. */
+async function forcerMiseAJour(){
+  if (!confirm("Recharger la dernière version de l'application ?\n\nAucune donnée n'est perdue : elles sont sur le serveur.")) return;
+  try{
+    if ('serviceWorker' in navigator){
+      const regs = await navigator.serviceWorker.getRegistrations();
+      for (const r of regs) { try { await r.unregister(); } catch(e){} }
+    }
+  }catch(e){}
+  try{
+    if (window.caches){
+      const noms = await caches.keys();
+      for (const n of noms) { try { await caches.delete(n); } catch(e){} }
+    }
+  }catch(e){}
+  const u = location.origin + location.pathname + '?maj=' + Date.now();
+  location.replace(u);
+}
+
+/* =====================================================================
    MODALE générique
    ===================================================================== */
 function openModal(html){
@@ -1512,6 +1571,10 @@ function openModal(html){
   b.innerHTML = html;
   try { translateDom(b); } catch(e){}
   document.getElementById('modalBg').classList.add('show');
+  // Toujours repartir du haut : sinon, en passant d'une fiche longue à un
+  // petit formulaire, l'écran restait en bas et le formulaire semblait
+  // ne pas s'ouvrir.
+  try { b.scrollTop = 0; } catch(e){}
 }
 function closeModal(){ document.getElementById('modalBg').classList.remove('show'); }
 document.addEventListener('click', e=>{ if (e.target.id==='modalBg') closeModal(); });
@@ -3347,6 +3410,7 @@ function renderAchats(){
       <td style="text-align:right;white-space:nowrap">
         <button class="fb fb-green fb-sm" onclick="event.stopPropagation();openDepotForm('${s.id}')">+ Dépôt</button>
         <button class="fb fb-gold  fb-sm" onclick="event.stopPropagation();openAchatForm('${s.id}')">🛒 Achat</button>
+        <button class="fb fb-ghost fb-sm" onclick="event.stopPropagation();openGestionMouvements('${s.id}')">✏️ Modifier</button>
         <button class="fb fb-ghost fb-sm" onclick="event.stopPropagation();printAchatsA4('${s.id}')">🖨️ Achats</button>
         <button class="fb fb-ghost fb-sm" onclick="event.stopPropagation();printDepotsA4('${s.id}')">🖨️ Dépôts</button>
         <button class="fb fb-ghost fb-sm" onclick="event.stopPropagation();printDepotsAchats('${s.id}')">📊</button>
@@ -3485,6 +3549,7 @@ function renderStudentCard(studentId, containerId, extra){
 function viewStudentAchats(studentId){
   const s = DB.students.find(x=>x.id===studentId);
   if (!s) return;
+  MOUVEMENT_RETOUR = 'fiche';
   const teacher = DB.teachers.find(t=>t.id===s.teacher_id);
   const tUser   = teacher ? DB.users.find(u=>u.id===teacher.user_id) : null;
 
@@ -3503,7 +3568,7 @@ function viewStudentAchats(studentId){
   const achatRows = achats.map(x=>{
     no++;
     const pu=Number(x.amount)||0, qty=Number(x.quantity)||1;
-    return `<tr>
+    return `<tr onclick="openEditAchat('${x.id}','${studentId}')" style="cursor:pointer" title="Toucher pour modifier cet achat">
       <td style="text-align:center;font-family:'DM Mono',monospace;font-size:10.5px;color:var(--muted)">${String(no).padStart(2,'0')}</td>
       <td>${esc(x.item)}</td>
       <td style="text-align:center">${qty}</td>
@@ -3511,19 +3576,19 @@ function viewStudentAchats(studentId){
       <td style="text-align:right;font-weight:800;font-family:'DM Mono',monospace;color:#f0c975">${fmtGNF(pu*qty)}</td>
       <td style="text-align:center;font-size:10.5px;color:var(--muted)">${x.date||''}</td>
       <td style="white-space:nowrap">
-        <button class="fb fb-ghost fb-sm" onclick="openEditAchat('${x.id}','${studentId}')">✏️</button>
-        <button class="fb fb-danger fb-sm" onclick="deleteAchat('${x.id}','${studentId}')">✕</button>
+        <button class="fb fb-ghost fb-sm" onclick="event.stopPropagation();openEditAchat('${x.id}','${studentId}')">✏️</button>
+        <button class="fb fb-danger fb-sm" onclick="event.stopPropagation();deleteAchat('${x.id}','${studentId}')">✕</button>
       </td>
     </tr>`;
   }).join('');
 
-  const depotRows = depots.map(d=>`<tr>
+  const depotRows = depots.map(d=>`<tr onclick="openEditDepot('${d.id}','${studentId}')" style="cursor:pointer" title="Toucher pour modifier ce dépôt">
     <td style="font-size:11px;color:var(--muted)">${d.date||''}</td>
     <td>${esc(d.item||'Dépôt tuteur')}</td>
     <td style="text-align:right;font-weight:800;color:#86efac;font-family:'DM Mono',monospace">+${fmtGNF(d.amount)}</td>
     <td style="white-space:nowrap">
-      <button class="fb fb-ghost fb-sm" onclick="openEditDepot('${d.id}','${studentId}')">✏️</button>
-      <button class="fb fb-danger fb-sm" onclick="deleteDepot('${d.id}','${studentId}')">✕</button>
+      <button class="fb fb-ghost fb-sm" onclick="event.stopPropagation();openEditDepot('${d.id}','${studentId}')">✏️</button>
+      <button class="fb fb-danger fb-sm" onclick="event.stopPropagation();deleteDepot('${d.id}','${studentId}')">✕</button>
     </td>
   </tr>`).join('');
 
@@ -3587,7 +3652,8 @@ function viewStudentAchats(studentId){
     </div>`:''}
 
     <!-- Tableau des achats -->
-    <div style="font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:7px">📋 Détail des achats (${achats.length})</div>
+    <div style="font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:2px">📋 Détail des achats (${achats.length})</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:7px">✏️ Touchez une ligne pour la modifier.</div>
     ${achatRows
       ? `<div class="table-wrap" style="margin-bottom:16px"><table>
           <thead><tr>
@@ -3624,7 +3690,8 @@ function viewStudentAchats(studentId){
          </div>`}
 
     <!-- Tableau des dépôts -->
-    <div style="font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:7px">💰 Dépôts du tuteur (${depots.length})</div>
+    <div style="font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:2px">💰 Dépôts du tuteur (${depots.length})</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:7px">✏️ Touchez une ligne pour modifier le dépôt.</div>
     ${depotRows
       ? `<div class="table-wrap"><table>
           <thead><tr><th>Date</th><th>Libellé</th><th style="text-align:right">Montant</th><th></th></tr></thead>
@@ -3860,6 +3927,94 @@ function deleteDepot(id, studentId){
 }
 
 /* ================================================================
+   GESTION DES MOUVEMENTS D'UN ÉLÈVE — dépôts des tuteurs et achats
+   Présentation en cartes : chaque bouton reste visible sur téléphone,
+   sans défilement horizontal.
+   ================================================================ */
+/** Écran à rouvrir après une modification : fiche complète ou liste de gestion. */
+let MOUVEMENT_RETOUR = 'fiche';
+function retourMouvements(studentId){
+  if (MOUVEMENT_RETOUR === 'gestion') openGestionMouvements(studentId);
+  else viewStudentAchats(studentId);
+}
+function openGestionMouvements(studentId){
+  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
+  MOUVEMENT_RETOUR = 'gestion';
+  const depots = DB.purchases.filter(x=>x.student_id===studentId&&x.type==='depot')
+    .sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const achats = DB.purchases.filter(x=>x.student_id===studentId&&x.type==='achat')
+    .sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+
+  const carte = (titre, sousTitre, montant, couleur, onEdit, onDel) => `
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:11px 12px;margin-bottom:9px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:9px">
+        <div style="min-width:0">
+          <div style="font-weight:700;font-size:13.5px;word-break:break-word">${titre}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">${sousTitre}</div>
+        </div>
+        <div style="font-weight:800;font-family:'DM Mono',monospace;color:${couleur};white-space:nowrap">${montant}</div>
+      </div>
+      <div style="display:flex;gap:7px">
+        <button class="fb fb-gold fb-sm" style="flex:1" onclick="${onEdit}">✏️ Modifier</button>
+        <button class="fb fb-danger fb-sm" onclick="${onDel}">🗑️ Supprimer</button>
+      </div>
+    </div>`;
+
+  const depotCards = depots.map(d=>carte(
+    esc(d.item||'Dépôt tuteur'),
+    'Reçu le '+(d.date||'—'),
+    '+'+fmtGNF(d.amount), '#86efac',
+    `openEditDepot('${d.id}','${studentId}')`,
+    `deleteDepotFromGestion('${d.id}','${studentId}')`)).join('');
+
+  const achatCards = achats.map(a=>{
+    const pu=Number(a.amount)||0, q=Number(a.quantity)||1;
+    return carte(
+      esc(a.item||'Article'),
+      q+' × '+fmtGNF(pu)+' — le '+(a.date||'—'),
+      '−'+fmtGNF(pu*q), '#fca5a5',
+      `openEditAchat('${a.id}','${studentId}')`,
+      `deleteAchatFromGestion('${a.id}','${studentId}')`);
+  }).join('');
+
+  const vide = t => `<div style="text-align:center;padding:16px;color:var(--muted);font-size:12.5px;background:var(--panel);border:1px solid var(--line);border-radius:11px;margin-bottom:9px">${t}</div>`;
+
+  openModal(`
+    <h3 style="margin:0 0 4px">✏️ Modifier les dépôts et les achats</h3>
+    <p style="color:var(--muted);font-size:12.5px;margin:0 0 14px">
+      <b>${esc(s.first_name+' '+s.last_name)}</b>
+      <span style="font-family:'DM Mono',monospace;color:var(--gold-light)">— ${esc(s.matricule)}</span>
+    </p>
+    <div style="display:flex;justify-content:space-between;background:rgba(212,160,60,.07);border:1px solid rgba(212,160,60,.22);border-radius:10px;padding:10px 12px;margin-bottom:16px;font-size:12.5px">
+      <span style="color:var(--muted)">Reste en dépôt</span>
+      <b style="font-family:'DM Mono',monospace;color:${studentFundBalance(studentId)<0?'#fca5a5':'#f0c975'}">${fmtGNF(studentFundBalance(studentId))}</b>
+    </div>
+
+    <div style="font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:7px">💰 Dépôts du tuteur (${depots.length})</div>
+    ${depotCards || vide('Aucun dépôt enregistré.')}
+
+    <div style="font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 7px">🛒 Achats de l'élève (${achats.length})</div>
+    ${achatCards || vide('Aucun achat enregistré.')}
+
+    <button class="fb fb-ghost" style="width:100%;margin-top:14px" onclick="closeModal()">Fermer</button>`);
+}
+/* Suppressions lancées depuis cette modale : on y revient ensuite. */
+function deleteDepotFromGestion(id, studentId){
+  const d = DB.purchases.find(x=>x.id===id);
+  if ((studentTotalDepose(studentId)-Number(d?.amount||0)) < studentTotalDepense(studentId)){
+    toast('Impossible : la suppression mettrait le solde en négatif.'); return;
+  }
+  if (!confirm('Supprimer ce dépôt ?')) return;
+  DB.purchases = DB.purchases.filter(x=>x.id!==id);
+  saveDB(); toast('Dépôt supprimé.'); openGestionMouvements(studentId);
+}
+function deleteAchatFromGestion(id, studentId){
+  if (!confirm("Supprimer cette ligne d'achat ?")) return;
+  DB.purchases = DB.purchases.filter(x=>x.id!==id);
+  saveDB(); toast('Ligne supprimée.'); openGestionMouvements(studentId);
+}
+
+/* ================================================================
    MODIFICATION D'UN DÉPÔT — montant, date et libellé
    ================================================================ */
 function openEditDepot(id, studentId){
@@ -3883,7 +4038,7 @@ function openEditDepot(id, studentId){
     </div>
     <div style="display:flex;gap:8px;margin-top:6px">
       <button class="fb fb-gold" style="flex:1" onclick="saveEditDepot('${d.id}','${studentId}')">💾 Enregistrer</button>
-      <button class="fb fb-ghost" onclick="closeModal();viewStudentAchats('${studentId}')">Annuler</button>
+      <button class="fb fb-ghost" onclick="retourMouvements('${studentId}')">Annuler</button>
     </div>`);
 }
 function saveEditDepot(id, studentId){
@@ -3902,7 +4057,7 @@ function saveEditDepot(id, studentId){
   d.edited_at = Date.now();
   saveDB(); closeModal();
   toast('Dépôt modifié : ' + fmtGNF(amount));
-  viewStudentAchats(studentId);
+  retourMouvements(studentId);
 }
 
 /* ================================================================
@@ -3945,7 +4100,7 @@ function openEditAchat(id, studentId){
     </div>
     <div style="display:flex;gap:8px;margin-top:6px">
       <button class="fb fb-gold" style="flex:1" onclick="saveEditAchat('${a.id}','${studentId}')">💾 Enregistrer</button>
-      <button class="fb fb-ghost" onclick="closeModal();viewStudentAchats('${studentId}')">Annuler</button>
+      <button class="fb fb-ghost" onclick="retourMouvements('${studentId}')">Annuler</button>
     </div>`);
   calcEditAchat(dispo);
 }
@@ -3985,7 +4140,7 @@ function saveEditAchat(id, studentId){
   a.edited_at = Date.now();
   saveDB(); closeModal();
   toast('Achat modifié : '+fmtGNF(nouveau));
-  viewStudentAchats(studentId);
+  retourMouvements(studentId);
 }
 
 /* ================================================================
@@ -7351,6 +7506,12 @@ function openEditStudent(id){
       <div class="fg"><label class="fl">Nom</label><input class="fi" id="edLast" value="${esc(s.last_name||'')}"></div>
     </div>
     <div class="fg2">
+      <div class="fg"><label class="fl">Date de naissance</label>
+        <input class="fi" type="date" id="edBirth" value="${esc(s.birth_date||'')}" max="${todayStr()}"></div>
+      <div class="fg"><label class="fl">Date d'inscription</label>
+        <input class="fi" type="date" id="edEnroll" value="${esc(s.enrollment_date||'')}"></div>
+    </div>
+    <div class="fg2">
       <div class="fg"><label class="fl">Sexe</label><select class="fi" id="edGender">
         <option value="M" ${s.gender==='M'?'selected':''}>Masculin</option>
         <option value="F" ${s.gender==='F'?'selected':''}>Féminin</option></select></div>
@@ -7387,6 +7548,13 @@ function saveEditStudent(id){
   if (!f || !l){ toast('Le prénom et le nom sont obligatoires.'); return; }
   s.first_name = f; s.last_name = l;
   s.gender = document.getElementById('edGender').value;
+  // Date de naissance : modifiable, et refusée si elle est dans le futur.
+  const nb = ((document.getElementById('edBirth')||{}).value||'').trim();
+  if (nb && nb > todayStr()){ toast('La date de naissance ne peut pas être dans le futur.'); return; }
+  s.birth_date = nb;
+  const ne = ((document.getElementById('edEnroll')||{}).value||'').trim();
+  if (ne && nb && ne < nb){ toast("La date d'inscription ne peut pas précéder la naissance."); return; }
+  if (ne) s.enrollment_date = ne;
   s.category = document.getElementById('edCat').value;
   s.guardian_name = document.getElementById('edGuardian').value.trim();
   s.guardian_phone = document.getElementById('edPhone').value.trim();
@@ -7944,6 +8112,22 @@ function renderSettings(){
 
   document.getElementById('pageContent').innerHTML = `
     ${pageHead('Réglages', 'Informations du markaz, comptes, thème, langue et calendrier')}
+
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:18px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div>
+          <div style="font-weight:800;font-size:13.5px">🔄 Version de l'application</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:3px">
+            Version installée : <b style="font-family:'DM Mono',monospace;color:var(--gold-light)">${AGM_VERSION}</b>
+          </div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:4px">
+            Si une correction ne s'affiche pas, l'appareil utilise encore l'ancienne version en mémoire.
+          </div>
+        </div>
+        <button class="fb fb-gold" onclick="forcerMiseAJour()">🔄 Forcer la mise à jour</button>
+      </div>
+    </div>
+
     ${calendarReviewHtml()}
     ${langBlockHtml()}
     ${recitDaysHtml()}
