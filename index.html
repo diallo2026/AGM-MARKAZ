@@ -1438,6 +1438,9 @@ const NAV_ITEMS = [
   { id:'juz',          label:'Djouzou',         ic:'📖', roles:['fondateur','admin','enseignant'] },
   { id:'evaluations',  label:'Évaluations',     ic:'🏆', roles:['fondateur','admin','enseignant'] },
   { id:'paiements',    label:'Paiements',       ic:'🧾', roles:['fondateur','admin','comptable'] },
+  { id:'fiche',        label:'Fiche de renseignement', ic:'📋', roles:['fondateur','admin','comptable'] },
+  { id:'cartes',       label:'Cartes de paiement', ic:'💳', roles:['fondateur','admin','comptable'] },
+  { id:'whatsapp',     label:'Rappels WhatsApp', ic:'📲', roles:['fondateur','admin','comptable'] },
   { id:'achats',       label:'Achats élèves',   ic:'🛍️', roles:['fondateur','admin','comptable'] },
   { id:'finance',      label:'Finances',        ic:'💰', roles:['fondateur','admin'] },
   { id:'depenses',     label:'Dépenses',        ic:'💸', roles:['fondateur','admin','comptable'] },
@@ -1510,6 +1513,9 @@ function navigate(page){
     juz: renderJuzGrid,
     evaluations: renderEvaluations,
     paiements: renderPaiements,
+    fiche: renderFichePage,
+    cartes: renderCartesPaiement,
+    whatsapp: renderWhatsApp,
     achats: renderAchats,
     finance: renderFinance,
     depenses: renderDepenses,
@@ -1542,7 +1548,7 @@ function pageHead(title, sub, actionsHtml){
    après un déploiement, c'est que l'ancienne version est encore en
    cache sur l'appareil.
    ===================================================================== */
-const AGM_VERSION = '2026.08.06-5';
+const AGM_VERSION = '2026.10.07-4';
 
 /** Supprime tout le cache local de l'appli et recharge la dernière version. */
 async function forcerMiseAJour(){
@@ -1928,7 +1934,7 @@ function openStudentForm(){
       <div class="fg"><label class="fl">Date de naissance</label><input class="fi" type="date" id="stBirth"></div>
     </div>
     <div class="fg2">
-      <div class="fg"><label class="fl">Catégorie</label><select class="fi" id="stCategory"><option value="internat">Internat</option><option value="externat">Externat</option></select></div>
+      <div class="fg"><label class="fl">Catégorie</label><select class="fi" id="stCategory" onchange="ficheApplyStudentDefaults()"><option value="internat">Internat</option><option value="externat">Externat</option></select></div>
       <div class="fg"><label class="fl">Enseignant</label><select class="fi" id="stTeacher"><option value="">-- Aucun --</option>${teacherOptions()}</select></div>
     </div>
     <div class="fg2">
@@ -2001,6 +2007,7 @@ function openStudentForm(){
       <button class="fb fb-gold" style="flex:1" onclick="saveStudent()">💾 Enregistrer</button>
       <button class="fb fb-ghost" onclick="closeModal()">Annuler</button>
     </div>`);
+  try { ficheApplyStudentDefaults(); } catch(e){}
 }
 
 function stLevelToggle(){
@@ -3264,58 +3271,7 @@ function studentDebtLedger(studentId){
   }
   return months;
 }
-function openDettesModal(){
-  ensureExt();
-  const students = DB.students.filter(s=>s.status!=='non_actif' && paymentStatusOf(s)==='payant');
-  const rows = students.map(s=>{
-    const ledger = studentDebtLedger(s.id);
-    const totalDue = ledger.reduce((a,m)=>a+m.balance,0);
-    const unpaidMonths = ledger.filter(m=>m.status==='impayé'||m.status==='partiel').length;
-    return `<tr>
-      <td>${esc(s.first_name+' '+s.last_name)}</td>
-      <td style="font-family:'DM Mono',monospace">${esc(s.matricule)}</td>
-      <td>${unpaidMonths}</td>
-      <td style="font-weight:700;color:${totalDue>0?'var(--danger)':'var(--ok)'}">${fmtGNF(totalDue)}</td>
-      <td style="text-align:right"><button class="fb fb-ghost fb-sm" onclick="openStudentLedger('${s.id}')">📅 Détail</button></td>
-    </tr>`;
-  }).join('');
-  openModal(`
-    <h3 style="margin:0 0 4px">📋 Dettes de scolarité</h3>
-    <p style="color:var(--muted);font-size:12px;margin:0 0 14px">Élèves au statut « payant » — mois dus depuis leur inscription.</p>
-    <div class="table-wrap" style="max-height:440px;overflow:auto">
-      <table><thead><tr><th>Élève</th><th>Matricule</th><th>Mois en retard</th><th>Total dû</th><th></th></tr></thead><tbody>${rows||''}</tbody></table>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:14px">
-      <button class="fb fb-ghost" style="flex:1" onclick="closeModal()">Fermer</button>
-    </div>`);
-}
-function openStudentLedger(studentId){
-  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
-  const ledger = studentDebtLedger(studentId);
-  const badge = st => st==='payé' ? '<span class="badge badge-green">Payé</span>'
-    : st==='partiel' ? '<span class="badge badge-amber">Partiel</span>'
-    : st==='impayé' ? '<span class="badge badge-red">Impayé</span>'
-    : '<span class="badge badge-slate">—</span>';
-  const rows = ledger.map(mo=>`
-    <tr>
-      <td>${esc(mo.label)}</td>
-      <td>${fmtGNF(mo.due)}</td>
-      <td>${fmtGNF(mo.paid)}</td>
-      <td>${badge(mo.status)}</td>
-      <td style="text-align:right">${mo.balance>0?`<button class="fb fb-green fb-sm" onclick="closeModal();openPaymentForm('${studentId}','${mo.ym}',${mo.balance})">💰 Verser</button>`:''}</td>
-    </tr>`).join('');
-  openModal(`
-    <h3 style="margin:0 0 4px">📅 Scolarité — ${esc(s.first_name+' '+s.last_name)}</h3>
-    <p style="color:var(--muted);font-size:12px;margin:0 0 14px">Matricule ${esc(s.matricule)} — mensualité ${fmtGNF(s.monthly_fee)}</p>
-    <div class="table-wrap" style="max-height:420px;overflow:auto">
-      <table><thead><tr><th>Mois</th><th>Dû</th><th>Payé</th><th>Statut</th><th></th></tr></thead><tbody>${rows||''}</tbody></table>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:14px">
-      <button class="fb fb-ghost" style="flex:1" onclick="openDettesModal()">← Retour</button>
-      <button class="fb fb-ghost" onclick="closeModal()">Fermer</button>
-    </div>`);
-}
-
+/* openDettesModal() et openStudentLedger() : voir MODULE N (recherche, cartes, bilans imprimables). */
 /** Reçu imprimable — généré automatiquement à chaque paiement. */
 function printReceipt(paymentId){
   const p = DB.payments.find(x=>x.id===paymentId);
@@ -8103,6 +8059,8 @@ function renderSettings(){
       </div>
     </div>
 
+    ${ficheSettingsCardHtml()}
+    ${waSettingsCardHtml()}
     ${calendarReviewHtml()}
     ${langBlockHtml()}
     ${recitDaysHtml()}
@@ -8534,6 +8492,1750 @@ function resetAllData(){
   toast('Données réinitialisées.');
   navigate('dashboard');
 }
+
+/* =====================================================================
+   ███  MODULE N — FICHE DE RENSEIGNEMENT · RAPPELS WHATSAPP AUTOMATIQUES
+        · RECHERCHE & BILAN DES DETTES · CARTES DE PAIEMENT
+   ---------------------------------------------------------------------
+   Ajouts NON destructifs (v2026.10.07) :
+   • aucune collection existante n'est modifiée ni restructurée ;
+   • seules trois clés FACULTATIVES peuvent apparaître dans la base, et
+     uniquement lorsque le fondateur enregistre un réglage ou qu'un
+     message part : ficheConfig, waConfig, waLog ;
+   • les élèves, paiements, achats… sont uniquement LUS par ce module.
+   ===================================================================== */
+
+/* ---------------------------------------------------------------------
+   Utilitaires communs du module
+   --------------------------------------------------------------------- */
+function nNum(v, def){ const n = Number(v); return (isFinite(n) && v!=='' && v!==null && v!==undefined) ? n : (def===undefined?0:def); }
+function nArr(v){ if (Array.isArray(v)) return v.filter(x=>x!==null && x!==undefined); if (v && typeof v==='object') return Object.values(v); return []; }
+function nClone(o){ return JSON.parse(JSON.stringify(o)); }
+function ymOf(y, m){ return y + '-' + String(m).padStart(2,'0'); }
+function nTodayYM(){ const d = new Date(); return ymOf(d.getFullYear(), d.getMonth()+1); }
+function nThemeColor(){ return (DB.theme && DB.theme.primary) || '#15803d'; }
+function nAccentColor(){ return (DB.theme && DB.theme.accent) || '#d4a03c'; }
+/** « de Mars » / « d'Octobre » */
+function nDe(w){ return /^[aeiouyhàâéèêîïôöûüAEIOUYHÀÂÉÈÊÎÏÔÖÛÜ]/.test(String(w||'')) ? "d'" + w : 'de ' + w; }
+function nDateFr(d){ try { return new Date(d).toLocaleDateString('fr-FR'); } catch(e){ return String(d||''); } }
+
+/** Montant en toutes lettres (français) — utilisé sur les bilans imprimés. */
+function nombreEnLettres(n){
+  n = Math.round(Math.abs(Number(n)||0));
+  if (n === 0) return 'zéro';
+  const U = ['','un','deux','trois','quatre','cinq','six','sept','huit','neuf','dix','onze','douze','treize',
+             'quatorze','quinze','seize','dix-sept','dix-huit','dix-neuf'];
+  const D = ['','dix','vingt','trente','quarante','cinquante','soixante','soixante','quatre-vingt','quatre-vingt'];
+  function deux(x){
+    if (x < 20) return U[x];
+    const d = Math.floor(x/10), u = x%10;
+    if (d===7 || d===9) return D[d] + ((d===7 && u===1) ? ' et ' : '-') + U[10+u];
+    if (u===0) return D[d] + (d===8 ? 's' : '');
+    if (u===1 && d!==8) return D[d] + ' et un';
+    return D[d] + '-' + U[u];
+  }
+  function trois(x){
+    const c = Math.floor(x/100), r = x%100; let s = '';
+    if (c > 1) s = U[c] + ' cent' + (r===0 ? 's' : '');
+    else if (c === 1) s = 'cent';
+    if (r) s += (s ? ' ' : '') + deux(r);
+    return s;
+  }
+  const parts = [];
+  const mds = Math.floor(n/1e9), mns = Math.floor((n%1e9)/1e6), mls = Math.floor((n%1e6)/1000), rst = n%1000;
+  if (mds) parts.push(trois(mds) + ' milliard' + (mds>1?'s':''));
+  if (mns) parts.push(trois(mns) + ' million' + (mns>1?'s':''));
+  if (mls) parts.push(mls===1 ? 'mille' : trois(mls).replace(/cents$/,'cent').replace(/vingts$/,'vingt') + ' mille');
+  if (rst) parts.push(trois(rst));
+  return parts.join(' ');
+}
+
+/** Montant payé par mois (« AAAA-MM » → GNF) pour un élève — même règle que le
+ *  suivi des dettes existant (paiements non rejetés, répartis sur les mois couverts). */
+function nPaidByMonth(studentId){
+  const map = {};
+  (DB.payments||[]).filter(p=>p.student_id===studentId && p.label==='Frais de scolarité' && p.status!=='rejected' && paymentMonths(p).length)
+    .forEach(p=>{
+      const ms = paymentMonths(p);
+      const share = Number(p.amount||0) / ms.length;
+      ms.forEach(ym=>{ map[ym] = (map[ym]||0) + share; });
+    });
+  return map;
+}
+/** Dernière date de paiement enregistrée pour un mois donné. */
+function nPayDateForMonth(studentId, ym){
+  const l = (DB.payments||[]).filter(p=>p.student_id===studentId && p.status!=='rejected' && paymentMonths(p).includes(ym))
+    .map(p=>p.date||'').sort();
+  return l.length ? l[l.length-1] : '';
+}
+/** Situation de dette d'un élève : arriérés avant le mois « limite » (exclu). */
+function nDebtSituation(s, beforeYM){
+  const ledger = studentDebtLedger(s.id);
+  const arrears = ledger.filter(m=>m.balance>0 && (!beforeYM || m.ym < beforeYM));
+  return {
+    ledger,
+    arrears,
+    arrearsAmount: arrears.reduce((a,m)=>a+m.balance,0),
+    totalDue: ledger.reduce((a,m)=>a+m.balance,0),
+    totalPaid: ledger.reduce((a,m)=>a+Math.min(m.paid, m.due||m.paid),0),
+  };
+}
+function nPayingStudents(){
+  return (DB.students||[]).filter(s=>s.status!=='non_actif' && paymentStatusOf(s)==='payant');
+}
+
+/* =====================================================================
+   1) FICHE DE RENSEIGNEMENT DU MARKAZ — configuration & impression
+   ===================================================================== */
+const FICHE_COLORS_BASE = ['Bleu','Vert','Blanc'];
+const FICHE_TENUES_BASE = ['Pantalon et kaftan','Kaftan (grand boubou) seul','Pantalon et chemise'];
+
+/** Configuration effective (valeurs par défaut si rien n'est encore enregistré). */
+function ficheCfg(){
+  const c = DB.ficheConfig || {};
+  const cal = (DB.calendar && DB.calendar.externat) || {};
+  const i = c.internat || {}, e = c.externat || {}, x = c.exigences || {}, d = c.dossier || {};
+  const uniq = a => a.filter((v,k)=>v && a.indexOf(v)===k);
+  return {
+    applyToNewStudents: c.applyToNewStudents !== false,
+    anneeScolaire: c.anneeScolaire || '',
+    internat: { inscription: nNum(i.inscription), mensualite: nNum(i.mensualite) },
+    externat: {
+      inscription: nNum(e.inscription), mensualite: nNum(e.mensualite),
+      heureDebut: e.heureDebut || cal.start || '08:00',
+      heureFin:   e.heureFin   || cal.end   || '12:00',
+    },
+    exigences: {
+      couleurs:   uniq(FICHE_COLORS_BASE.concat(nArr(x.couleurs))),
+      couleur:    x.couleur || '',
+      tenues:     uniq(FICHE_TENUES_BASE.concat(nArr(x.tenues))),
+      tenue:      x.tenue || FICHE_TENUES_BASE[0],
+      nbTenues:   nNum(x.nbTenues, 2),
+      nbMaillots: nNum(x.nbMaillots, 2),
+      nbChaussures: nNum(x.nbChaussures, 1),
+      matelas:    x.matelas === 'deux' ? 'deux' : 'une',
+      nbMatelas:  nNum(x.nbMatelas, 1),
+      nbCouvertures: nNum(x.nbCouvertures, 1),
+      autres:     nArr(x.autres).map(a=>({ label:String(a.label||''), qte:nNum(a.qte,1) })).filter(a=>a.label),
+    },
+    dossier: {
+      fournitures: d.fournitures !== false,
+      fournituresDetail: d.fournituresDetail || '',
+      coran:   d.coran !== false,
+      hourouf: d.hourouf !== false,
+      extrait: d.extrait !== false,
+      photos:  nNum(d.photos, 2),
+      autres:  nArr(d.autres).map(String).filter(Boolean),
+    },
+    note: c.note || '',
+    presentation: c.presentation || '',
+    responsables: nArr(c.responsables).map(r=>({ fonction:String(r.fonction||''), nom:String(r.nom||''), tel:String(r.tel||'') })),
+  };
+}
+
+let FICHE_EDIT = null;   // copie de travail pendant la configuration
+
+/** Carte affichée dans Réglages. */
+function ficheSettingsCardHtml(){
+  const c = ficheCfg();
+  const can = isAdminOrAbove();
+  const x = c.exigences;
+  return `
+  <div class="card" style="margin-bottom:16px;border-left:4px solid var(--gold)">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+      <div style="min-width:0">
+        <b>📋 Fiche de renseignement du markaz</b>
+        <div style="font-size:12px;color:var(--muted);margin-top:4px">Montants internat / externat, horaires de l'externat, trousseau exigé et pièces à fournir.</div>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:12px 0">
+      <div class="stat-card"><div class="sl">Internat — inscription</div><div class="sv" style="font-size:15px">${c.internat.inscription?fmtGNF(c.internat.inscription):'—'}</div></div>
+      <div class="stat-card"><div class="sl">Internat — mensualité</div><div class="sv" style="font-size:15px">${c.internat.mensualite?fmtGNF(c.internat.mensualite):'—'}</div></div>
+      <div class="stat-card"><div class="sl">Externat — inscription</div><div class="sv" style="font-size:15px">${c.externat.inscription?fmtGNF(c.externat.inscription):'—'}</div></div>
+      <div class="stat-card"><div class="sl">Externat — mensualité</div><div class="sv" style="font-size:15px">${c.externat.mensualite?fmtGNF(c.externat.mensualite):'—'}</div></div>
+      <div class="stat-card"><div class="sl">Cours externat</div><div class="sv" style="font-size:15px">${esc(c.externat.heureDebut)} → ${esc(c.externat.heureFin)}</div></div>
+      <div class="stat-card"><div class="sl">Couleur de la tenue</div><div class="sv" style="font-size:15px">${esc(x.couleur||'—')}</div></div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      ${can?`<button class="fb fb-gold fb-sm" onclick="openFicheConfig()">⚙️ Configurer la fiche</button>`:''}
+      <button class="fb fb-ghost fb-sm" onclick="openFichePrintChoice()">🖨️ Imprimer la fiche</button>
+      <button class="fb fb-ghost fb-sm" onclick="navigate('fiche')">📋 Ouvrir l'onglet Fiche</button>
+    </div>
+  </div>`;
+}
+
+function openFicheConfig(){
+  if (!isAdminOrAbove()){ toast('Réservé au fondateur / administrateur.'); return; }
+  FICHE_EDIT = ficheCfg();
+  renderFicheConfigModal();
+}
+
+/** Lit les champs du formulaire dans la copie de travail (avant tout re-rendu). */
+function ficheCollect(){
+  const f = FICHE_EDIT; if (!f) return;
+  const v = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
+  const ck = id => { const el = document.getElementById(id); return el ? !!el.checked : undefined; };
+  const setN = (obj, key, id) => { const val = v(id); if (val !== undefined) obj[key] = nNum(val, 0); };
+  if (v('fcAnnee') !== undefined) f.anneeScolaire = v('fcAnnee').trim();
+  setN(f.internat,'inscription','fcIntIns'); setN(f.internat,'mensualite','fcIntMen');
+  setN(f.externat,'inscription','fcExtIns'); setN(f.externat,'mensualite','fcExtMen');
+  if (v('fcExtDeb')) f.externat.heureDebut = v('fcExtDeb');
+  if (v('fcExtFin')) f.externat.heureFin = v('fcExtFin');
+  const x = f.exigences;
+  if (v('fcCouleur') !== undefined) x.couleur = v('fcCouleur');
+  if (v('fcTenue') !== undefined) x.tenue = v('fcTenue');
+  setN(x,'nbTenues','fcNbTenues'); setN(x,'nbMaillots','fcNbMaillots'); setN(x,'nbChaussures','fcNbChaussures');
+  if (v('fcMatelas') !== undefined) x.matelas = v('fcMatelas')==='deux' ? 'deux' : 'une';
+  setN(x,'nbMatelas','fcNbMatelas'); setN(x,'nbCouvertures','fcNbCouv');
+  x.autres.forEach((a,i)=>{ const l = v('fcAutL'+i), q = v('fcAutQ'+i); if (l!==undefined) a.label = l; if (q!==undefined) a.qte = nNum(q,1); });
+  const d = f.dossier;
+  ['fournitures','coran','hourouf','extrait'].forEach(k=>{ const c = ck('fcD_'+k); if (c!==undefined) d[k] = c; });
+  if (v('fcFournDet') !== undefined) d.fournituresDetail = v('fcFournDet');
+  setN(d,'photos','fcPhotos');
+  d.autres = d.autres.map((a,i)=>{ const l = v('fcDocA'+i); return l!==undefined ? l : a; });
+  if (v('fcNote') !== undefined) f.note = v('fcNote');
+  if (v('fcPres') !== undefined) f.presentation = v('fcPres');
+  f.responsables.forEach((r,i)=>{ ['fonction','nom','tel'].forEach(k=>{ const val = v('fcR'+k+i); if (val!==undefined) r[k] = val; }); });
+  const ap = ck('fcApply'); if (ap !== undefined) f.applyToNewStudents = ap;
+}
+
+function renderFicheConfigModal(){
+  const f = FICHE_EDIT, x = f.exigences, d = f.dossier;
+  const box = 'background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:12px 13px;margin-bottom:12px';
+  const opt = (list, cur) => list.map(o=>`<option ${o===cur?'selected':''}>${esc(o)}</option>`).join('');
+  openModal(`
+    <h3 style="margin-bottom:4px">📋 Fiche de renseignement du markaz</h3>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:14px">Ces réglages servent à la fiche imprimée remise aux parents. Ils ne modifient aucun élève ni aucun paiement existant.</p>
+
+    <div class="fg"><label class="fl">Année scolaire (affichée sur la fiche)</label>
+      <input class="fi" id="fcAnnee" value="${esc(f.anneeScolaire)}" placeholder="Ex : 2026-2027"></div>
+
+    <div style="${box}">
+      <div class="fl" style="margin-bottom:8px">🏠 Internat</div>
+      <div class="fg2">
+        <div class="fg"><label class="fl">Frais d'inscription (GNF)</label><input class="fi" type="number" min="0" id="fcIntIns" value="${f.internat.inscription||''}" placeholder="0"></div>
+        <div class="fg"><label class="fl">Mensualité (GNF)</label><input class="fi" type="number" min="0" id="fcIntMen" value="${f.internat.mensualite||''}" placeholder="0"></div>
+      </div>
+    </div>
+
+    <div style="${box}">
+      <div class="fl" style="margin-bottom:8px">🚶 Externat</div>
+      <div class="fg2">
+        <div class="fg"><label class="fl">Frais d'inscription (GNF)</label><input class="fi" type="number" min="0" id="fcExtIns" value="${f.externat.inscription||''}" placeholder="0"></div>
+        <div class="fg"><label class="fl">Mensualité (GNF)</label><input class="fi" type="number" min="0" id="fcExtMen" value="${f.externat.mensualite||''}" placeholder="0"></div>
+      </div>
+      <div class="fg2">
+        <div class="fg"><label class="fl">Début du cours</label><input class="fi" type="time" id="fcExtDeb" value="${esc(f.externat.heureDebut)}"></div>
+        <div class="fg"><label class="fl">Fin du cours</label><input class="fi" type="time" id="fcExtFin" value="${esc(f.externat.heureFin)}"></div>
+      </div>
+    </div>
+
+    <div style="${box}">
+      <div class="fl" style="margin-bottom:8px">🎒 Exigences de l'internat (trousseau)</div>
+      <div class="fg"><label class="fl">Couleur de la tenue</label>
+        <select class="fi" id="fcCouleur"><option value="">— Choisir —</option>${opt(x.couleurs, x.couleur)}</select>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <input class="fi" id="fcNewColor" placeholder="Autre couleur (ex : Beige, Gris…)" style="flex:1">
+          <button type="button" class="fb fb-ghost fb-sm" onclick="ficheAddColor()">＋ Ajouter</button>
+        </div>
+      </div>
+      <div class="fg"><label class="fl">Type de complet</label>
+        <select class="fi" id="fcTenue">${opt(x.tenues, x.tenue)}</select>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <input class="fi" id="fcNewTenue" placeholder="Autre type de complet…" style="flex:1">
+          <button type="button" class="fb fb-ghost fb-sm" onclick="ficheAddTenue()">＋ Ajouter</button>
+        </div>
+      </div>
+      <div class="fg2">
+        <div class="fg"><label class="fl">Nombre de complets</label><input class="fi" type="number" min="0" id="fcNbTenues" value="${x.nbTenues}"></div>
+        <div class="fg"><label class="fl">Nombre de maillots</label><input class="fi" type="number" min="0" id="fcNbMaillots" value="${x.nbMaillots}"></div>
+      </div>
+      <div class="fg2">
+        <div class="fg"><label class="fl">Paires de chaussures</label><input class="fi" type="number" min="0" id="fcNbChaussures" value="${x.nbChaussures}"></div>
+        <div class="fg"><label class="fl">Nombre de couvertures</label><input class="fi" type="number" min="0" id="fcNbCouv" value="${x.nbCouvertures}"></div>
+      </div>
+      <div class="fg2">
+        <div class="fg"><label class="fl">Matelas</label>
+          <select class="fi" id="fcMatelas"><option value="une" ${x.matelas==='une'?'selected':''}>Une place</option><option value="deux" ${x.matelas==='deux'?'selected':''}>Deux places</option></select></div>
+        <div class="fg"><label class="fl">Nombre de matelas</label><input class="fi" type="number" min="0" id="fcNbMatelas" value="${x.nbMatelas}"></div>
+      </div>
+      <div class="fl" style="margin:4px 0 6px">Autres articles exigés</div>
+      ${x.autres.map((a,i)=>`
+        <div style="display:flex;gap:6px;margin-bottom:6px">
+          <input class="fi" id="fcAutL${i}" value="${esc(a.label)}" style="flex:1">
+          <input class="fi" type="number" min="0" id="fcAutQ${i}" value="${a.qte}" style="width:76px">
+          <button type="button" class="fb fb-danger fb-sm" onclick="ficheDelAutre(${i})">✕</button>
+        </div>`).join('')}
+      <button type="button" class="fb fb-ghost fb-sm" onclick="ficheAddAutre()">＋ Ajouter un article (seau, moustiquaire, savon…)</button>
+    </div>
+
+    <div style="${box}">
+      <div class="fl" style="margin-bottom:8px">📄 Pièces et fournitures à fournir</div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:6px"><input type="checkbox" id="fcD_fournitures" ${d.fournitures?'checked':''}> Fournitures scolaires (élèves scolarisés)</label>
+      <input class="fi" id="fcFournDet" value="${esc(d.fournituresDetail)}" placeholder="Détail : cahiers, stylos, ardoise…" style="margin-bottom:8px">
+      <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:6px"><input type="checkbox" id="fcD_coran" ${d.coran?'checked':''}> Le Saint Coran (moushaf)</label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:6px"><input type="checkbox" id="fcD_hourouf" ${d.hourouf?'checked':''}> Livret de Hourouf (pour les débutants)</label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:8px"><input type="checkbox" id="fcD_extrait" ${d.extrait?'checked':''}> Extrait d'acte de naissance</label>
+      <div class="fg"><label class="fl">Photos d'identité (nombre, 0 = non exigé)</label><input class="fi" type="number" min="0" id="fcPhotos" value="${d.photos}"></div>
+      ${d.autres.map((a,i)=>`
+        <div style="display:flex;gap:6px;margin-bottom:6px">
+          <input class="fi" id="fcDocA${i}" value="${esc(a)}" style="flex:1">
+          <button type="button" class="fb fb-danger fb-sm" onclick="ficheDelDoc(${i})">✕</button>
+        </div>`).join('')}
+      <button type="button" class="fb fb-ghost fb-sm" onclick="ficheAddDoc()">＋ Ajouter une pièce</button>
+    </div>
+
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:12px 13px;margin-bottom:12px">
+      <div class="fl" style="margin-bottom:8px">📞 Responsables à contacter (affichés sur la fiche)</div>
+      ${f.responsables.map((r,i)=>`
+        <div style="border:1px dashed var(--line);border-radius:9px;padding:8px;margin-bottom:8px">
+          <div class="fg2">
+            <div class="fg" style="margin-bottom:6px"><input class="fi" id="fcRfonction${i}" value="${esc(r.fonction)}" placeholder="Fonction (Fondateur, Directeur…)"></div>
+            <div class="fg" style="margin-bottom:6px"><input class="fi" id="fcRnom${i}" value="${esc(r.nom)}" placeholder="Nom et prénom"></div>
+          </div>
+          <div style="display:flex;gap:6px"><input class="fi" id="fcRtel${i}" value="${esc(r.tel)}" placeholder="Téléphone / WhatsApp" style="flex:1">
+            <button type="button" class="fb fb-danger fb-sm" onclick="ficheDelResp(${i})">✕</button></div>
+        </div>`).join('')}
+      ${f.responsables.length<6?`<button type="button" class="fb fb-ghost fb-sm" onclick="ficheAddResp()">＋ Ajouter un responsable</button>`:''}
+      ${!f.responsables.length?`<div style="font-size:11.5px;color:var(--muted);margin-top:6px">Sans responsable saisi, la fiche affiche le fondateur et le téléphone du markaz.</div>`:''}
+    </div>
+
+    <div class="fg"><label class="fl">Présentation du markaz (phrase d'accueil sur la fiche)</label>
+      <textarea class="fi" id="fcPres" rows="2" placeholder="Ex : Le markaz accueille les enfants pour la mémorisation du Saint Coran…">${esc(f.presentation)}</textarea></div>
+
+    <div class="fg"><label class="fl">Informations importantes / règlement (facultatif)</label>
+      <textarea class="fi" id="fcNote" rows="3" placeholder="Ex : visites autorisées le vendredi après-midi…">${esc(f.note)}</textarea></div>
+
+    <label style="display:flex;gap:8px;align-items:flex-start;font-size:12.5px;margin-bottom:14px">
+      <input type="checkbox" id="fcApply" ${f.applyToNewStudents?'checked':''} style="margin-top:2px">
+      <span>Proposer automatiquement ces frais d'inscription et mensualités dans le formulaire « Nouvel élève » selon la catégorie choisie (les élèves déjà inscrits ne changent pas).</span>
+    </label>
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="fb fb-gold" style="flex:1" onclick="saveFicheConfig()">💾 Enregistrer</button>
+      <button class="fb fb-ghost" onclick="ficheCollect();printFicheRenseignement(null, FICHE_EDIT)">🖨️ Aperçu</button>
+      <button class="fb fb-ghost" onclick="closeModal()">Annuler</button>
+    </div>`);
+}
+function ficheAddColor(){
+  ficheCollect();
+  const v = (document.getElementById('fcNewColor')||{}).value || '';
+  const c = v.trim(); if (!c){ toast('Saisissez le nom de la couleur.'); return; }
+  const cap = c.charAt(0).toUpperCase() + c.slice(1);
+  if (!FICHE_EDIT.exigences.couleurs.some(x=>x.toLowerCase()===cap.toLowerCase())) FICHE_EDIT.exigences.couleurs.push(cap);
+  FICHE_EDIT.exigences.couleur = cap;
+  renderFicheConfigModal(); toast('Couleur « '+cap+' » ajoutée et sélectionnée.');
+}
+function ficheAddTenue(){
+  ficheCollect();
+  const t = ((document.getElementById('fcNewTenue')||{}).value || '').trim();
+  if (!t){ toast('Saisissez le type de complet.'); return; }
+  if (!FICHE_EDIT.exigences.tenues.includes(t)) FICHE_EDIT.exigences.tenues.push(t);
+  FICHE_EDIT.exigences.tenue = t;
+  renderFicheConfigModal();
+}
+function ficheAddAutre(){ ficheCollect(); FICHE_EDIT.exigences.autres.push({label:'',qte:1}); renderFicheConfigModal(); }
+function ficheDelAutre(i){ ficheCollect(); FICHE_EDIT.exigences.autres.splice(i,1); renderFicheConfigModal(); }
+function ficheAddResp(){ ficheCollect(); FICHE_EDIT.responsables.push({fonction:'',nom:'',tel:''}); renderFicheConfigModal(); }
+function ficheDelResp(i){ ficheCollect(); FICHE_EDIT.responsables.splice(i,1); renderFicheConfigModal(); }
+function ficheAddDoc(){ ficheCollect(); FICHE_EDIT.dossier.autres.push(''); renderFicheConfigModal(); }
+function ficheDelDoc(i){ ficheCollect(); FICHE_EDIT.dossier.autres.splice(i,1); renderFicheConfigModal(); }
+
+function saveFicheConfig(){
+  if (!isAdminOrAbove()) return;
+  ficheCollect();
+  const f = nClone(FICHE_EDIT);
+  // On ne stocke que les couleurs / tenues AJOUTÉES (les valeurs de base sont implicites).
+  f.exigences.couleurs = f.exigences.couleurs.filter(c=>!FICHE_COLORS_BASE.includes(c));
+  f.exigences.tenues = f.exigences.tenues.filter(t=>!FICHE_TENUES_BASE.includes(t));
+  f.exigences.autres = f.exigences.autres.filter(a=>a.label && a.label.trim());
+  f.dossier.autres = f.dossier.autres.map(s=>String(s).trim()).filter(Boolean);
+  f.responsables = f.responsables.map(r=>({ fonction:r.fonction.trim(), nom:r.nom.trim(), tel:r.tel.trim() })).filter(r=>r.nom || r.tel);
+  if (f.externat.heureFin && f.externat.heureDebut && f.externat.heureFin <= f.externat.heureDebut){
+    toast("L'heure de fin du cours doit être après l'heure de début."); return;
+  }
+  f.updatedAt = Date.now();
+  DB.ficheConfig = f;
+  saveDB();
+  logAction('Fiche de renseignement', 'Configuration mise à jour');
+  closeModal();
+  toast('✅ Fiche de renseignement enregistrée.');
+  if (currentPage==='settings') renderSettings();
+  else if (currentPage==='fiche') renderFichePage();
+}
+
+/** La fiche est une fiche d'information du markaz : impression directe. */
+function openFichePrintChoice(){ printFicheRenseignement(null); }
+
+/** Fiche de renseignement = FICHE D'INFORMATION du markaz, remise aux personnes qui
+ *  souhaitent inscrire leur enfant : présentation, contacts des responsables,
+ *  frais d'inscription et mensualités, horaires, exigences. UNE seule page A4. */
+function ficheHtml(_unused, cfgOverride){
+  ensureExt();
+  const c = cfgOverride ? nClone(cfgOverride) : ficheCfg();
+  const x = c.exigences, d = c.dossier;
+  const P = nThemeColor(), A = nAccentColor();
+  const logo = DB.centerLogo || AGM_LOGO;
+  const annee = c.anneeScolaire || (()=>{ const n = new Date(); const y = n.getMonth() >= 7 ? n.getFullYear() : n.getFullYear()-1; return y + '-' + (y+1); })();
+  const money = v => v ? fmtGNF(v).replace(' GNF','') + '<small> GNF</small>' : '<span class="nd">—</span>';
+  const resp = ficheResponsables(c);
+
+  const trousseau = [];
+  if (x.nbTenues)      trousseau.push(['👘', `Complet${x.nbTenues>1?'s':''}`, esc(x.tenue), x.nbTenues]);
+  if (x.nbMaillots)    trousseau.push(['👕', 'Maillots', '', x.nbMaillots]);
+  if (x.nbChaussures)  trousseau.push(['👟', 'Paires de chaussures', '', x.nbChaussures]);
+  if (x.nbMatelas)     trousseau.push(['🛏️', 'Matelas', x.matelas==='deux'?'deux places':'une place', x.nbMatelas]);
+  if (x.nbCouvertures) trousseau.push(['🧣', 'Couvertures', '', x.nbCouvertures]);
+  x.autres.forEach(a=>trousseau.push(['✔️', esc(a.label), '', a.qte]));
+  const pieces = [];
+  if (d.extrait) pieces.push(["Extrait d'acte de naissance", '']);
+  if (d.photos)  pieces.push([d.photos + " photo(s) d'identité", '']);
+  if (d.coran)   pieces.push(['Le Saint Coran (moushaf)', '']);
+  if (d.hourouf) pieces.push(['Livret de Hourouf', 'pour les débutants']);
+  if (d.fournitures) pieces.push(['Fournitures scolaires', d.fournituresDetail ? esc(d.fournituresDetail) : 'pour les élèves scolarisés']);
+  d.autres.forEach(a=>pieces.push([esc(a), '']));
+  const totInt = (c.internat.inscription||0) + (c.internat.mensualite||0);
+  const totExt = (c.externat.inscription||0) + (c.externat.mensualite||0);
+  const pres = c.presentation || "Le markaz accueille les enfants pour l'apprentissage et la mémorisation du Saint Coran, dans un cadre sérieux, éducatif et bienveillant, en internat comme en externat.";
+
+  return `<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">
+  <title>Fiche de renseignement — ${esc(DB.centerName||'AGM')}</title>
+  <link href="https://fonts.googleapis.com/css2?family=Amiri:wght@700&family=DM+Sans:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <style>
+    @page{ size:A4 portrait; margin:0; }
+    *{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
+    html,body{background:#e9eeeb}
+    body{font-family:'DM Sans',Arial,Helvetica,sans-serif;color:#1c2b22;font-size:9.4pt;line-height:1.35}
+    .bar{text-align:center;padding:12px}
+    .bar button{padding:10px 18px;border:0;border-radius:8px;font-weight:800;font-size:13px;background:${P};color:#fff;cursor:pointer;font-family:inherit}
+    .page{width:210mm;height:297mm;margin:0 auto 20px;background:#fff;position:relative;overflow:hidden;box-shadow:0 6px 30px rgba(0,0,0,.18)}
+    .inner{position:absolute;top:0;left:0;right:0;min-height:100%;padding:9mm 11mm 10mm;display:flex;flex-direction:column;transform-origin:top center}
+    .frame{position:absolute;inset:5mm;border:1.2pt solid ${P};border-radius:3mm;pointer-events:none}
+    .frame:after{content:'';position:absolute;inset:1.2mm;border:.5pt solid ${A};border-radius:2.2mm}
+    .wm{position:absolute;left:50%;top:56%;width:125mm;height:125mm;transform:translate(-50%,-50%);opacity:.045;object-fit:contain;pointer-events:none}
+    .bism{text-align:center;font-family:'Amiri',serif;font-size:14pt;color:${P};margin-bottom:1.5mm}
+    .head{display:flex;align-items:center;gap:4.5mm;background:linear-gradient(120deg,${P} 0%,${P} 60%,${A} 165%);color:#fff;border-radius:3mm;padding:4mm 5mm}
+    .logo{width:26mm;height:26mm;border-radius:50%;background:#fff;padding:1.6mm;flex-shrink:0;box-shadow:0 0 0 .8mm rgba(255,255,255,.35)}
+    .logo img{width:100%;height:100%;object-fit:contain;border-radius:50%}
+    .hid{flex:1;min-width:0}
+    .nm{font-size:18pt;font-weight:800;line-height:1.08}
+    .ad{font-size:8.6pt;opacity:.92;margin-top:1.2mm}
+    .doc{margin-top:2.4mm;display:flex;align-items:center;gap:2.2mm;flex-wrap:wrap}
+    .doc b{font-size:11pt;letter-spacing:.14em;text-transform:uppercase}
+    .yr{background:${A};color:#1a1004;font-weight:800;font-size:8.3pt;padding:.8mm 2.8mm;border-radius:6mm}
+    .open{flex-shrink:0;text-align:center;border:.5mm solid rgba(255,255,255,.7);border-radius:2.5mm;padding:2.5mm 3mm;font-size:7.6pt;line-height:1.25}
+    .open b{display:block;font-size:10.5pt;letter-spacing:.05em}
+    .intro{margin:3mm 1mm 0;font-size:9.4pt;color:#33473b;text-align:center;font-style:italic}
+    .sec{margin-top:3.2mm}
+    .st{display:flex;align-items:center;gap:2mm;font-size:9pt;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:${P};margin-bottom:1.8mm}
+    .st .n{width:5.4mm;height:5.4mm;border-radius:50%;background:${P};color:#fff;display:flex;align-items:center;justify-content:center;font-size:8pt;letter-spacing:0}
+    .st:after{content:'';flex:1;height:.35mm;background:linear-gradient(90deg,${A},transparent)}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:4mm}
+    .card{border:.35mm solid #d7e2db;border-radius:2.4mm;padding:2.6mm 3mm;background:rgba(255,255,255,.93)}
+    .tf{border-radius:2.6mm;overflow:hidden;border:.35mm solid ${P};background:#fbfdfc}
+    .tf.ext{border-color:${A}}
+    .tf .th{background:${P};color:#fff;padding:2mm 3mm;font-weight:800;font-size:10.5pt;display:flex;justify-content:space-between;align-items:center}
+    .tf.ext .th{background:${A};color:#1a1004}
+    .tf .th small{font-weight:500;font-size:7.8pt;opacity:.92}
+    .tf .tb{display:grid;grid-template-columns:1fr 1fr;padding:2.4mm 3mm 2.6mm;gap:2mm 3mm}
+    .k{font-size:6.9pt;text-transform:uppercase;letter-spacing:.06em;color:#6b7f74;font-weight:700}
+    .m{font-size:13.5pt;font-weight:800;color:#13261a;margin-top:.3mm}
+    .m small{font-size:7.6pt;font-weight:700;color:#6b7f74}
+    .tf .ln{grid-column:1/-1;font-size:8.6pt;border-top:.3mm dashed #cfdcd4;padding-top:1.6mm;display:flex;justify-content:space-between;gap:2mm}
+    .nd{color:#9aa9a0}
+    .items{display:grid;grid-template-columns:1fr 1fr;gap:1.4mm 2.5mm}
+    .it{display:flex;align-items:center;gap:1.8mm;border:.3mm solid #e1eae5;border-radius:1.8mm;padding:1.3mm 2mm;background:#f8fbf9}
+    .it .ic{font-size:10pt;width:5mm;text-align:center}
+    .it .tx{flex:1;min-width:0;font-size:8.6pt;line-height:1.2}
+    .it .tx small{display:block;color:#6b7f74;font-size:7.2pt}
+    .it .q{font-weight:800;color:${P};font-size:10pt;min-width:6mm;text-align:right}
+    .color{display:flex;align-items:center;gap:2mm;margin-bottom:2mm;font-size:9pt;background:#f6faf7;border-radius:1.8mm;padding:1.4mm 2mm}
+    .sw{width:4.4mm;height:4.4mm;border-radius:50%;border:.3mm solid #889}
+    ul.chk{list-style:none}
+    ul.chk li{display:flex;gap:2mm;align-items:flex-start;padding:1.2mm 0;border-bottom:.25mm solid #e3ebe6;font-size:8.8pt}
+    ul.chk li:last-child{border-bottom:0}
+    ul.chk li:before{content:'✓';flex-shrink:0;width:4.4mm;height:4.4mm;border-radius:50%;background:${P};color:#fff;font-size:7pt;font-weight:800;display:flex;align-items:center;justify-content:center;margin-top:.2mm}
+    ul.chk small{color:#6b7f74;font-size:7.4pt}
+    .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:2.5mm}
+    .stp{border-radius:2.2mm;background:#f4f8f5;border-top:1mm solid ${A};padding:2mm 2.4mm;font-size:8.3pt}
+    .stp b{display:block;color:${P};font-size:8.8pt;margin-bottom:.6mm}
+    .note{font-size:8.4pt;white-space:pre-wrap;background:#f6faf7;border-left:1mm solid ${A};border-radius:1.4mm;padding:2mm 3mm}
+    .contacts{display:grid;grid-template-columns:repeat(${Math.min(3, Math.max(1, resp.length))},1fr);gap:2.5mm}
+    .ct{border:.35mm solid ${P};border-radius:2.4mm;padding:2.2mm 2.8mm;background:linear-gradient(180deg,#f3f9f5,#fff)}
+    .ct .f{font-size:6.9pt;text-transform:uppercase;letter-spacing:.07em;color:${A};font-weight:800}
+    .ct .p{font-size:10pt;font-weight:800;margin-top:.4mm;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .ct .t{font-size:9.6pt;font-weight:700;color:${P};margin-top:.6mm}
+    .spacer{flex:1;min-height:1mm}
+    .welcome{text-align:center;margin-top:3mm;font-size:9.2pt;color:${P};font-weight:800}
+    .welcome span{font-family:'Amiri',serif;font-size:11.5pt;display:block;margin-top:.6mm}
+    .foot{display:flex;justify-content:space-between;align-items:center;font-size:7pt;color:#7b8d83;border-top:.3mm solid #dfe8e3;padding-top:1.4mm;margin-top:2.2mm}
+    @media print{ html,body{background:#fff} .bar{display:none!important} .page{margin:0;box-shadow:none} }
+  </style></head><body>
+  <div class="bar"><button onclick="window.print()">🖨️ Imprimer / Enregistrer en PDF (A4, 1 page)</button></div>
+  <div class="page"><div class="frame"></div><img class="wm" src="${logo}" onerror="this.remove()">
+  <div class="inner" id="inner">
+    <div class="bism">بسم الله الرحمن الرحيم</div>
+    <div class="head">
+      <div class="logo"><img src="${logo}" onerror="this.style.display='none'"></div>
+      <div class="hid">
+        <div class="nm">${esc(DB.centerName||'AGM')}</div>
+        <div class="ad">📍 ${esc(DB.centerAddress||'Adresse du markaz')}${DB.centerPhone?' &nbsp;·&nbsp; ☎ '+esc(DB.centerPhone):''}</div>
+        <div class="doc"><b>Fiche de renseignement</b><span class="yr">Année ${esc(annee)}</span></div>
+      </div>
+      <div class="open"><b>INSCRIPTIONS</b>OUVERTES<br>Internat · Externat</div>
+    </div>
+    <div class="intro">${esc(pres)}</div>
+
+    <div class="sec">
+      <div class="st"><span class="n">1</span>Frais d'inscription et mensualités</div>
+      <div class="two">
+        <div class="tf"><div class="th">🏠 Internat <small>Pension complète</small></div>
+          <div class="tb"><div><div class="k">Frais d'inscription</div><div class="m">${money(c.internat.inscription)}</div></div>
+          <div><div class="k">Mensualité</div><div class="m">${money(c.internat.mensualite)}</div></div>
+          <div class="ln"><span>À verser à l'inscription (inscription + 1er mois)</span><b>${totInt?fmtGNF(totInt):'—'}</b></div></div></div>
+        <div class="tf ext"><div class="th">🚶 Externat <small>Cours de ${esc(c.externat.heureDebut)} à ${esc(c.externat.heureFin)}</small></div>
+          <div class="tb"><div><div class="k">Frais d'inscription</div><div class="m">${money(c.externat.inscription)}</div></div>
+          <div><div class="k">Mensualité</div><div class="m">${money(c.externat.mensualite)}</div></div>
+          <div class="ln"><span>À verser à l'inscription (inscription + 1er mois)</span><b>${totExt?fmtGNF(totExt):'—'}</b></div></div></div>
+      </div>
+    </div>
+
+    <div class="sec two">
+      <div>
+        <div class="st"><span class="n">2</span>Exigences de l'internat</div>
+        <div class="card">
+          ${x.couleur?`<div class="color">Couleur de la tenue : <span class="sw" style="background:${ficheColorCss(x.couleur)}"></span><b>${esc(x.couleur)}</b></div>`:''}
+          ${trousseau.length?`<div class="items">${trousseau.map(r=>`<div class="it"><span class="ic">${r[0]}</span><span class="tx">${r[1]}${r[2]?`<small>${r[2]}</small>`:''}</span><span class="q">×${r[3]}</span></div>`).join('')}</div>`:'<span class="nd">Aucune exigence particulière.</span>'}
+        </div>
+      </div>
+      <div>
+        <div class="st"><span class="n">3</span>Pièces à fournir</div>
+        <div class="card">
+          ${pieces.length?`<ul class="chk">${pieces.map(p=>`<li><span>${p[0]}${p[1]?`<br><small>${p[1]}</small>`:''}</span></li>`).join('')}</ul>`:'<span class="nd">—</span>'}
+        </div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="st"><span class="n">4</span>Comment se passe l'inscription ?</div>
+      <div class="steps">
+        <div class="stp"><b>① Dépôt du dossier</b>Présentez-vous au markaz avec l'enfant et les pièces demandées.</div>
+        <div class="stp"><b>② Paiement</b>Réglez les frais d'inscription et le premier mois ; un reçu vous est remis.</div>
+        <div class="stp"><b>③ Mensualités</b>À payer au plus tard le <b style="display:inline;color:inherit">10</b> de chaque mois, sur présentation de votre carte de paiement.</div>
+      </div>
+    </div>
+
+    ${c.note?`<div class="sec"><div class="st"><span class="n">5</span>Informations importantes</div><div class="note">${esc(c.note)}</div></div>`:''}
+
+    <div class="sec">
+      <div class="st"><span class="n">${c.note?6:5}</span>Contacts des responsables</div>
+      ${resp.length?`<div class="contacts">${resp.map(r=>`<div class="ct"><div class="f">${esc(r.fonction||'Responsable')}</div><div class="p">${esc(r.nom||'')}</div>${r.tel?`<div class="t">☎ ${esc(r.tel)}</div>`:''}</div>`).join('')}</div>`
+        :`<div class="note">Renseignez les responsables dans la configuration de la fiche.</div>`}
+    </div>
+
+    <div class="spacer"></div>
+    <div class="welcome">Nous serons heureux d'accueillir votre enfant.<span>بارك الله فيكم</span></div>
+    <div class="foot"><span>${esc(DB.centerName||'AGM')} — ${esc(DB.centerAddress||'')}</span><span>Fiche d'information · ${esc(annee)}</span></div>
+  </div></div>
+  <scr`+`ipt>
+    function fit(){
+      var el=document.getElementById('inner'); el.style.transform='';
+      var H=el.parentNode.clientHeight, h=el.offsetHeight;
+      if(h>H+1){ el.style.transform='scale('+(H/h)+')'; }
+    }
+    window.addEventListener('load',fit); setTimeout(fit,400);
+    if(document.fonts&&document.fonts.ready) document.fonts.ready.then(fit);
+  </scr`+`ipt></body></html>`;
+}
+/** Responsables affichés : ceux configurés, sinon le fondateur et le téléphone du markaz. */
+function ficheResponsables(c){
+  const list = nArr(c.responsables).filter(r=>r && (r.nom || r.tel));
+  if (list.length) return list.slice(0,6);
+  const f = (DB.users||[]).find(u=>u.role==='fondateur');
+  return f ? [{ fonction:'Fondateur', nom:(f.first_name||'')+' '+(f.last_name||''), tel: DB.centerPhone||'' }] : [];
+}
+function printFicheRenseignement(_unused, cfgOverride){
+  const html = ficheHtml(null, cfgOverride);
+  const w = window.open('', '_blank', 'width=900,height=1100');
+  if (!w){ toast('Autorisez les fenêtres pop-up pour imprimer.'); return; }
+  w.document.write(html); w.document.close();
+}
+/** Pastille de couleur de la tenue (couleurs courantes reconnues, sinon gris neutre). */
+function ficheColorCss(name){
+  const m = { bleu:'#1d4ed8', vert:'#15803d', blanc:'#ffffff', noir:'#111827', beige:'#e8d9b5', gris:'#9ca3af', marron:'#7c4a1e',
+    rouge:'#dc2626', jaune:'#facc15', orange:'#f97316', violet:'#7c3aed', rose:'#f472b6', bordeaux:'#7f1d1d', kaki:'#8a865d', crème:'#f5ecd7', creme:'#f5ecd7', 'bleu ciel':'#7dd3fc', 'bleu marine':'#1e3a8a' };
+  return m[String(name||'').trim().toLowerCase()] || '#cbd5e1';
+}
+
+/** Formulaire « Nouvel élève » : propose les montants configurés selon la catégorie. */
+function ficheApplyStudentDefaults(){
+  try {
+    const c = ficheCfg(); if (!c.applyToNewStudents) return;
+    const cat = (document.getElementById('stCategory')||{}).value;
+    const conf = cat==='externat' ? c.externat : (cat==='internat' ? c.internat : null);
+    if (!conf) return;
+    const fee = document.getElementById('stFee'), men = document.getElementById('stMonthly');
+    if (fee && conf.inscription) fee.value = conf.inscription;
+    if (men && conf.mensualite) men.value = conf.mensualite;
+  } catch(e){}
+}
+
+/* =====================================================================
+   2) RAPPELS & CONFIRMATIONS WHATSAPP AUTOMATIQUES
+   ---------------------------------------------------------------------
+   Un navigateur ne peut pas envoyer un WhatsApp tout seul : l'envoi
+   automatique passe par une passerelle WhatsApp (Green-API, UltraMsg ou
+   une passerelle personnalisée) reliée au numéro WhatsApp du markaz.
+   Sans passerelle, le module fonctionne en mode « assisté » (un bouton
+   par parent ouvre WhatsApp avec le message déjà rédigé).
+   ===================================================================== */
+const WA_DEFAULT_DAYS = [28,1,5,6,7,8,9,10];
+function waCfg(){
+  const c = DB.waConfig || {};
+  const days = nArr(c.days).map(Number).filter(n=>n>=1 && n<=31);
+  return {
+    enabled: !!c.enabled,
+    provider: ['greenapi','ultramsg','custom','manual'].includes(c.provider) ? c.provider : 'manual',
+    apiUrl: c.apiUrl || 'https://api.green-api.com',
+    idInstance: c.idInstance || '', apiToken: c.apiToken || '',
+    ultraInstance: c.ultraInstance || '', ultraToken: c.ultraToken || '',
+    customUrl: c.customUrl || '', customAuth: c.customAuth || '',
+    countryCode: String(c.countryCode || '224').replace(/\D/g,''),
+    days: days.length ? days.sort((a,b)=>a-b) : WA_DEFAULT_DAYS.slice(),
+    hour: c.hour || '09:00',
+    remindUpcoming: c.remindUpcoming !== false,
+    remindDebt: c.remindDebt !== false,
+    confirmPayment: c.confirmPayment !== false,
+    confirmDelay: nNum(c.confirmDelay, 5),
+    confirmTrigger: c.confirmTrigger === 'recorded' ? 'recorded' : 'approved',
+    checkNumbers: c.checkNumbers !== false,
+    senderDevice: c.senderDevice || '',
+    senderDeviceLabel: c.senderDeviceLabel || '',
+    activatedAt: nNum(c.activatedAt, 0),
+    intro: c.intro || 'Assalamou alaykoum wa rahmatoullah',
+    footer: c.footer || "Merci de passer régler au bureau du markaz. Qu'Allah vous récompense.",
+    gap: Math.max(2, nNum(c.gap, 4)),
+  };
+}
+function waAuto(){ const c = waCfg(); return c.enabled && c.provider !== 'manual'; }
+
+/** Identifiant PERSISTANT de cet appareil (pour désigner l'appareil d'envoi). */
+function waDeviceId(){
+  let id = null;
+  try { id = localStorage.getItem('agm_wa_device'); } catch(e){}
+  if (!id){ id = 'wad-' + Math.random().toString(36).slice(2,10); try { localStorage.setItem('agm_wa_device', id); } catch(e){} }
+  return id;
+}
+
+/** Numéro au format international sans « + » (ex : 224623030403). */
+function waNormPhone(raw){
+  let d = String(raw||'').trim();
+  if (!d) return '';
+  d = d.replace(/[^\d+]/g,'');
+  if (d.startsWith('+')) d = d.slice(1);
+  else if (d.startsWith('00')) d = d.slice(2);
+  d = d.replace(/\D/g,'');
+  const cc = waCfg().countryCode;
+  if (cc && !d.startsWith(cc) && d.length <= 10) d = cc + d.replace(/^0+/,'');
+  return d.length >= 8 ? d : '';
+}
+
+/* ---- Journal (dédoublonnage : jamais deux fois le même message) ---- */
+function waLog(){ if (!DB.waLog || typeof DB.waLog !== 'object' || Array.isArray(DB.waLog)) DB.waLog = {}; return DB.waLog; }
+function waLogGet(key){ return (DB.waLog && DB.waLog[key]) || null; }
+function waLogSet(key, entry){
+  const L = waLog();
+  L[key] = Object.assign({ at: Date.now() }, L[key]||{}, entry, { at: Date.now() });
+  // Purge : on ne garde que 120 jours d'historique d'envoi.
+  const limit = Date.now() - 120*86400000;
+  Object.keys(L).forEach(k=>{ if ((L[k] && L[k].at || 0) < limit) delete L[k]; });
+  saveDB();
+}
+function waDayKey(d){ d = d || new Date(); return d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0'); }
+
+/* ---- Passerelles ---- */
+async function waApiSend(phone, text){
+  const c = waCfg();
+  if (c.provider === 'greenapi'){
+    if (!c.idInstance || !c.apiToken) throw new Error('Identifiants Green-API manquants');
+    const base = (c.apiUrl || 'https://api.green-api.com').replace(/\/+$/,'');
+    const r = await fetch(base + '/waInstance' + encodeURIComponent(c.idInstance) + '/sendMessage/' + encodeURIComponent(c.apiToken), {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ chatId: phone + '@c.us', message: text })
+    });
+    const j = await r.json().catch(()=>({}));
+    if (!r.ok || !j.idMessage) throw new Error(j.message || ('Erreur passerelle HTTP ' + r.status));
+    return j.idMessage;
+  }
+  if (c.provider === 'ultramsg'){
+    if (!c.ultraInstance || !c.ultraToken) throw new Error('Identifiants UltraMsg manquants');
+    const body = new URLSearchParams({ token: c.ultraToken, to: '+' + phone, body: text });
+    const r = await fetch('https://api.ultramsg.com/' + encodeURIComponent(c.ultraInstance) + '/messages/chat', {
+      method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body
+    });
+    const j = await r.json().catch(()=>({}));
+    if (!r.ok || j.error || !(j.sent==='true' || j.sent===true || j.id)) throw new Error((j.error && (j.error.message||JSON.stringify(j.error))) || ('Erreur passerelle HTTP ' + r.status));
+    return j.id || 'ok';
+  }
+  if (c.provider === 'custom'){
+    if (!c.customUrl) throw new Error('Adresse de la passerelle manquante');
+    const h = {'Content-Type':'application/json'};
+    if (c.customAuth) h['Authorization'] = c.customAuth;
+    const r = await fetch(c.customUrl, { method:'POST', headers:h,
+      body: JSON.stringify({ phone, message: text, markaz: DB.centerName || 'AGM' }) });
+    if (!r.ok) throw new Error('Erreur passerelle HTTP ' + r.status);
+    return 'ok';
+  }
+  throw new Error('Aucune passerelle configurée');
+}
+
+/** Le numéro a-t-il un compte WhatsApp ? true / false / null (inconnu). Résultat
+ *  mémorisé 30 jours sur l'appareil pour ne pas interroger la passerelle à chaque fois. */
+async function waHasWhatsApp(phone){
+  const c = waCfg();
+  if (!c.checkNumbers) return null;
+  let cache = {};
+  try { cache = JSON.parse(localStorage.getItem('agm_wa_numcache') || '{}'); } catch(e){}
+  const hit = cache[phone];
+  if (hit && (Date.now() - hit.t) < 30*86400000) return hit.v;
+  let v = null;
+  try {
+    if (c.provider === 'greenapi'){
+      const base = (c.apiUrl || 'https://api.green-api.com').replace(/\/+$/,'');
+      const r = await fetch(base + '/waInstance' + encodeURIComponent(c.idInstance) + '/checkWhatsapp/' + encodeURIComponent(c.apiToken), {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ phoneNumber: Number(phone) }) });
+      const j = await r.json().catch(()=>({}));
+      if (r.ok && typeof j.existsWhatsapp === 'boolean') v = j.existsWhatsapp;
+    } else if (c.provider === 'ultramsg'){
+      const r = await fetch('https://api.ultramsg.com/' + encodeURIComponent(c.ultraInstance) + '/contacts/check?token=' + encodeURIComponent(c.ultraToken) + '&chatId=' + phone + '@c.us');
+      const j = await r.json().catch(()=>({}));
+      if (r.ok && j.status) v = (j.status === 'valid');
+    }
+  } catch(e){ v = null; }
+  if (v !== null){ cache[phone] = { v, t: Date.now() }; try { localStorage.setItem('agm_wa_numcache', JSON.stringify(cache)); } catch(e){} }
+  return v;
+}
+
+/* ---- Rédaction des messages ---- */
+function waReminderTarget(ref){
+  ref = ref || new Date();
+  let y = ref.getFullYear(), m = ref.getMonth()+1;
+  // Fin de mois (à partir du 20) : on annonce la mensualité du mois SUIVANT.
+  if (ref.getDate() >= 20){ m++; if (m > 12){ m = 1; y++; } }
+  return ymOf(y, m);
+}
+
+/** File des rappels du jour : un seul message par numéro de parent (tous ses enfants regroupés). */
+function waBuildReminderQueue(ref){
+  ref = ref || new Date();
+  const c = waCfg();
+  const target = waReminderTarget(ref);
+  const groups = {}, noPhone = [];
+  nPayingStudents().forEach(s=>{
+    const fee = Number(s.monthly_fee)||0;
+    if (fee <= 0) return;
+    if (s.enrollment_date && String(s.enrollment_date).slice(0,7) > target) return;
+    const sit = nDebtSituation(s, target);
+    const paidT = nPaidByMonth(s.id)[target] || 0;
+    const dueT = Math.max(0, fee - paidT);
+    const hasDebt = sit.arrearsAmount > 0;
+    if (hasDebt && !c.remindDebt && !c.remindUpcoming) return;
+    if (!hasDebt && (!c.remindUpcoming || dueT <= 0)) return;
+    const line = { s, arrears: hasDebt && c.remindDebt ? sit.arrears : [], arrearsAmount: hasDebt && c.remindDebt ? sit.arrearsAmount : 0,
+                   target, dueT: c.remindUpcoming ? dueT : 0 };
+    if (!line.arrearsAmount && !line.dueT) return;
+    const phone = waNormPhone(s.guardian_phone);
+    if (!phone){ noPhone.push(line); return; }
+    if (!groups[phone]) groups[phone] = { phone, parent: s.guardian_name || '', lines: [] };
+    groups[phone].lines.push(line);
+  });
+  const day = waDayKey(ref);
+  const items = Object.values(groups).map(g=>{
+    const total = g.lines.reduce((a,l)=>a+l.arrearsAmount+l.dueT,0);
+    const debt = g.lines.some(l=>l.arrearsAmount>0);
+    return Object.assign(g, { key: day + '_rap_' + g.phone, type: debt ? 'dette' : 'rappel', total, text: waReminderText(g, total, debt) });
+  }).sort((a,b)=>b.total-a.total);
+  return { items, noPhone, target };
+}
+function waReminderText(g, total, debt){
+  const c = waCfg();
+  let t = `${c.intro}${g.parent ? ', cher parent ' + g.parent : ', cher parent'}.\n\n`;
+  t += debt ? `*${DB.centerName||'AGM'}* — 🔔 Rappel de paiement et d'arriérés\n` : `*${DB.centerName||'AGM'}* — 🔔 Rappel de la mensualité\n`;
+  g.lines.forEach(l=>{
+    t += `\n👤 *${l.s.first_name} ${l.s.last_name}* (${l.s.matricule||''})\n`;
+    if (l.arrearsAmount > 0){
+      t += `   • Arriérés : ${l.arrears.length} mois (${l.arrears.map(m=>m.label).join(', ')}) → *${fmtGNF(l.arrearsAmount)}*\n`;
+    }
+    if (l.dueT > 0) t += `   • Mensualité ${nDe(monthYearLabel(l.target))} : ${fmtGNF(l.dueT)}\n`;
+    if (l.arrearsAmount > 0 && l.dueT > 0) t += `   ➜ Sous-total : ${fmtGNF(l.arrearsAmount + l.dueT)}\n`;
+  });
+  t += `\n💰 *Montant total à régler : ${fmtGNF(total)}*\n`;
+  if (!debt) t += `La mensualité est attendue au plus tard le 10. Merci pour votre régularité 🙏\n`;
+  t += `\n${c.footer}`;
+  return t;
+}
+function waPaymentText(p){
+  const c = waCfg();
+  const s = (DB.students||[]).find(x=>x.id===p.student_id) || {};
+  let t = `✅ *${DB.centerName||'AGM'}* — Paiement reçu\n\n`;
+  t += `${c.intro}${s.guardian_name ? ', cher parent ' + s.guardian_name : ''}.\nNous confirmons la bonne réception de votre paiement :\n\n`;
+  t += `👤 Élève : ${s.first_name||''} ${s.last_name||''} (${s.matricule||''})\n`;
+  t += `🧾 Reçu N° : ${p.receipt_no||'—'}\n`;
+  t += `📌 Motif : ${p.label||''}\n`;
+  if (paymentMonths(p).length) t += `📅 Mois réglé(s) : ${paymentMonthsLabel(p)}\n`;
+  t += `💰 Montant : *${fmtGNF(p.amount)}*\n`;
+  t += `🗓️ Date : ${p.date||''}\n`;
+  if (s.id && paymentStatusOf(s)==='payant'){
+    const sit = nDebtSituation(s, nTodayYM() + '-99');
+    if (sit.totalDue > 0) t += `\n⚠️ Reste à régler : *${fmtGNF(sit.totalDue)}* (${sit.arrears.length} mois : ${sit.arrears.map(m=>m.label).join(', ')})\n`;
+    else t += `\n🎉 Votre enfant est à jour de sa scolarité.\n`;
+  }
+  t += `\nJazakallahou khayran. Qu'Allah vous récompense.`;
+  return t;
+}
+
+/* ---- Envoi d'un message avec journalisation ---- */
+async function waDeliver(key, phone, text, meta){
+  const prev = waLogGet(key);
+  if (prev && (prev.s === 'ok' || prev.s === 'nowa')) return prev.s;
+  const has = await waHasWhatsApp(phone);
+  if (has === false){ waLogSet(key, Object.assign({}, meta, { p: phone, s: 'nowa', e: 'Numéro sans compte WhatsApp' })); return 'nowa'; }
+  try {
+    await waApiSend(phone, text);
+    waLogSet(key, Object.assign({}, meta, { p: phone, s: 'ok', e: '' }));
+    return 'ok';
+  } catch(e){
+    const tries = (prev && prev.tries || 0) + 1;
+    waLogSet(key, Object.assign({}, meta, { p: phone, s: 'fail', e: String(e && e.message || e).slice(0,160), tries }));
+    return 'fail';
+  }
+}
+
+/* ---- Rappels programmés ---- */
+const WA_RUN = { busy: false, progress: '', lastTick: 0 };
+async function waRunReminders(manual){
+  if (WA_RUN.busy){ toast('Envoi déjà en cours…'); return; }
+  if (!waAuto()){ if (manual) toast('Configurez d’abord une passerelle WhatsApp (mode automatique).'); return; }
+  WA_RUN.busy = true;
+  try {
+    const q = waBuildReminderQueue(new Date());
+    const todo = q.items.filter(it=>{ const l = waLogGet(it.key); return !(l && (l.s==='ok' || l.s==='nowa' || (l.s==='fail' && (l.tries||0) >= 3))); });
+    let ok = 0, ko = 0, nowa = 0, i = 0;
+    for (const it of todo){
+      i++;
+      // Re-vérification juste avant l'envoi : un autre appareil a peut-être déjà envoyé.
+      const l = waLogGet(it.key); if (l && (l.s==='ok' || l.s==='nowa')) continue;
+      WA_RUN.progress = `Envoi ${i}/${todo.length} — ${it.parent || it.phone}`;
+      waRefreshProgress();
+      const r = await waDeliver(it.key, it.phone, it.text, { t: it.type, n: it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', '), m: it.total, ids: it.lines.map(x=>x.s.id).join(',') });
+      if (r==='ok') ok++; else if (r==='nowa') nowa++; else ko++;
+      await new Promise(res=>setTimeout(res, waCfg().gap*1000));
+    }
+    WA_RUN.progress = '';
+    if (todo.length || manual){
+      logAction('Rappels WhatsApp', `${ok} envoyé(s), ${nowa} sans WhatsApp, ${ko} échec(s)`);
+      toast(`📲 Rappels WhatsApp : ${ok} envoyé(s)` + (nowa?`, ${nowa} sans WhatsApp`:'') + (ko?`, ${ko} échec(s)`:''), 5000);
+    }
+  } finally {
+    WA_RUN.busy = false; WA_RUN.progress = '';
+    if (currentPage === 'whatsapp') renderWhatsApp();
+  }
+}
+function waRefreshProgress(){ const el = document.getElementById('waProgress'); if (el) el.textContent = WA_RUN.progress || ''; }
+
+/* ---- Confirmation automatique de paiement (5 s après validation) ---- */
+function waPaymentEligible(p){
+  if (!p || p.status === 'rejected') return false;
+  const c = waCfg();
+  if (p.status === 'approved') return true;
+  return c.confirmTrigger === 'recorded' && p.status === 'pending';
+}
+function waOnPaymentEvent(p){
+  const c = waCfg();
+  if (!c.enabled || !c.confirmPayment || !waPaymentEligible(p)) return;
+  if (waLogGet('pay_' + p.id)) return;
+  const id = p.id;
+  setTimeout(()=>{ waSendPaymentConfirmation(id); }, Math.max(0, c.confirmDelay) * 1000);
+}
+async function waSendPaymentConfirmation(paymentId, force){
+  const p = (DB.payments||[]).find(x=>x.id===paymentId);
+  if (!p || (!force && !waPaymentEligible(p))) return;
+  const key = 'pay_' + p.id;
+  const prev = waLogGet(key);
+  if (!force && prev && (prev.s==='ok' || prev.s==='nowa' || prev.s==='manual')) return;
+  const s = (DB.students||[]).find(x=>x.id===p.student_id) || {};
+  const phone = waNormPhone(s.guardian_phone);
+  if (!phone){ toast('ℹ️ Paiement validé — aucun numéro de parent pour l’envoi WhatsApp.'); return; }
+  const text = waPaymentText(p);
+  if (!waAuto()){ waShowManualBanner(key, phone, text, s); return; }
+  const r = await waDeliver(key, phone, text, { t:'paiement', n: (s.first_name||'')+' '+(s.last_name||''), m: p.amount, ids: s.id||'' });
+  if (r === 'ok') toast('📲 Confirmation de paiement envoyée au parent sur WhatsApp.');
+  else if (r === 'nowa') toast('ℹ️ Le numéro du parent n’a pas de compte WhatsApp.');
+  else toast('⚠️ Envoi WhatsApp échoué — nouvel essai automatique plus tard.', 4000);
+  if (currentPage === 'whatsapp') renderWhatsApp();
+}
+/** Mode assisté (sans passerelle) : petit bandeau non bloquant avec le message prêt. */
+function waShowManualBanner(key, phone, text, s){
+  let b = document.getElementById('waManualBanner');
+  if (!b){
+    b = document.createElement('div'); b.id = 'waManualBanner';
+    b.style.cssText = 'position:fixed;left:50%;bottom:70px;transform:translateX(-50%);z-index:9998;background:#fff;color:#14261b;border:2px solid #16a34a;border-radius:12px;padding:12px 14px;box-shadow:0 10px 28px rgba(0,0,0,.3);max-width:92vw;width:380px;font-size:13px';
+    document.body.appendChild(b);
+  }
+  b.innerHTML = `<b>📲 Paiement validé</b><div style="margin:4px 0 10px;color:#5f7268">Envoyer la confirmation à ${esc(s.guardian_name||'parent')} (${esc(phone)}) ?</div>
+    <div style="display:flex;gap:8px"><button class="fb fb-green fb-sm" style="flex:1" id="waBannerGo">Envoyer sur WhatsApp</button>
+    <button class="fb fb-ghost fb-sm" onclick="document.getElementById('waManualBanner').remove()">Plus tard</button></div>`;
+  document.getElementById('waBannerGo').onclick = function(){
+    window.open('https://wa.me/' + phone + '?text=' + encodeURIComponent(text), '_blank');
+    waLogSet(key, { t:'paiement', p: phone, s:'manual', n:(s.first_name||'')+' '+(s.last_name||'') });
+    b.remove();
+  };
+  clearTimeout(b._t); b._t = setTimeout(()=>{ try{ b.remove(); }catch(e){} }, 60000);
+}
+
+/** Filet de sécurité : paiements validés récemment mais pas encore confirmés
+ *  (ex : validé sur un autre appareil, ou réseau coupé au moment de l'envoi). */
+async function waScanPaymentConfirmations(){
+  const c = waCfg();
+  if (!c.confirmPayment || !c.activatedAt) return;
+  const now = Date.now();
+  const list = (DB.payments||[]).filter(p=>{
+    if (!waPaymentEligible(p)) return false;
+    const at = p.status==='approved' ? Number(p.approved_at||0) : waIdTime(p.id);
+    if (!at || at < c.activatedAt || at > now - 2*60000 || at < now - 3*86400000) return false;
+    const l = waLogGet('pay_' + p.id);
+    return !(l && (l.s==='ok' || l.s==='nowa' || l.s==='manual' || (l.s==='fail' && (l.tries||0) >= 3)));
+  });
+  for (const p of list.slice(0,10)){
+    await waSendPaymentConfirmation(p.id);
+    await new Promise(r=>setTimeout(r, c.gap*1000));
+  }
+}
+function waIdTime(id){ try { const m = String(id||'').split('_')[1]; return parseInt(m.slice(0, m.length-5), 36) || 0; } catch(e){ return 0; } }
+
+/* ---- Horloge : vérifie chaque minute (application ouverte) ---- */
+async function waTick(){
+  try {
+    if (!SESSION || !DB || typeof currentUser !== 'function') return;
+    const u = currentUser(); if (!u || !['fondateur','admin','comptable'].includes(u.role)) return;
+    const c = waCfg();
+    if (!waAuto()) return;
+    if (c.senderDevice && c.senderDevice !== waDeviceId()) return;   // un seul appareil d'envoi désigné
+    if (WA_RUN.busy) return;
+    await waScanPaymentConfirmations();
+    const now = new Date();
+    if (!c.days.includes(now.getDate())) return;
+    const hm = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0');
+    if (hm < c.hour) return;
+    // Petit délai aléatoire : si plusieurs appareils sont ouverts, le premier envoie
+    // et les autres voient le journal synchronisé avant de commencer.
+    await new Promise(r=>setTimeout(r, Math.random()*15000));
+    if (WA_RUN.busy) return;
+    const q = waBuildReminderQueue(now);
+    const pending = q.items.some(it=>{ const l = waLogGet(it.key); return !(l && (l.s==='ok' || l.s==='nowa' || (l.s==='fail' && (l.tries||0) >= 3))); });
+    if (pending) await waRunReminders(false);
+  } catch(e){ console.warn('AGM WhatsApp: tick', e && e.message); }
+}
+if (!window._agmWaTimer){
+  window._agmWaTimer = setInterval(waTick, 60000);
+  setTimeout(waTick, 20000);
+}
+
+/* ---- Accrochage aux paiements (sans modifier les fonctions d'origine) ---- */
+(function(){
+  if (window._agmWaHooked) return; window._agmWaHooked = true;
+  const _rec = recordPayment;
+  recordPayment = function(){ const p = _rec.apply(this, arguments); try { waOnPaymentEvent(p); } catch(e){} return p; };
+  const _app = approvePayment;
+  approvePayment = function(paymentId){
+    const before = (DB.payments||[]).find(x=>x.id===paymentId);
+    const wasPending = before && before.status === 'pending';
+    const r = _app.apply(this, arguments);
+    try {
+      const after = (DB.payments||[]).find(x=>x.id===paymentId);
+      if (wasPending && after && after.status === 'approved'){
+        // Si une confirmation « en attente » était déjà partie (déclencheur = enregistrement), on n'en renvoie pas.
+        waOnPaymentEvent(after);
+      }
+    } catch(e){}
+    return r;
+  };
+})();
+
+/* ---- Page « Rappels WhatsApp » ---- */
+function renderWhatsApp(){
+  ensureExt();
+  const c = waCfg();
+  const can = isAdminOrAbove();
+  const q = waBuildReminderQueue(new Date());
+  const isDay = c.days.includes(new Date().getDate());
+  const debtors = nPayingStudents().filter(s=>nDebtSituation(s, nTodayYM()).arrearsAmount > 0);
+  const totalDebt = debtors.reduce((a,s)=>a+nDebtSituation(s, nTodayYM()).arrearsAmount,0);
+  const provLbl = { manual:'Mode assisté (sans passerelle)', greenapi:'Green-API', ultramsg:'UltraMsg', custom:'Passerelle personnalisée' }[c.provider];
+  const isSender = !c.senderDevice || c.senderDevice === waDeviceId();
+  const logs = Object.entries(DB.waLog||{}).map(([k,v])=>Object.assign({key:k}, v)).sort((a,b)=>(b.at||0)-(a.at||0)).slice(0,80);
+  const stBadge = s => s==='ok' ? '<span class="badge badge-green">Envoyé</span>'
+    : s==='nowa' ? '<span class="badge badge-slate">Sans WhatsApp</span>'
+    : s==='manual' ? '<span class="badge badge-gold">Ouvert manuellement</span>'
+    : '<span class="badge badge-red">Échec</span>';
+  const typeLbl = t => ({ dette:'Rappel + arriérés', rappel:'Rappel mensualité', paiement:'Confirmation paiement', test:'Test' }[t] || t || '—');
+
+  document.getElementById('pageContent').innerHTML = `
+    ${pageHead('Rappels WhatsApp', 'Rappels de mensualité, relances des dettes et confirmations de paiement automatiques',
+      (can?`<button class="fb fb-gold" onclick="openWaConfig()">⚙️ Configurer</button> `:'') +
+      `<button class="fb fb-green" onclick="waManualRun()">▶️ Envoyer les rappels maintenant</button>`)}
+
+    <div class="card" style="margin-bottom:14px;border-left:4px solid ${waAuto()?'#16a34a':'#f59e0b'}">
+      <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start">
+        <div>
+          <b>${waAuto()?'🟢 Envoi automatique ACTIF':'🟠 Envoi automatique inactif'}</b>
+          <div style="font-size:12.5px;color:var(--muted);margin-top:4px">Passerelle : <b>${esc(provLbl)}</b></div>
+          <div style="font-size:12.5px;color:var(--muted)">Jours de rappel : <b>${c.days.join(', ')}</b> du mois, à partir de <b>${esc(c.hour)}</b>${isDay?' — <b style="color:var(--brand)">aujourd’hui est un jour de rappel</b>':''}</div>
+          <div style="font-size:12.5px;color:var(--muted)">Confirmation de paiement : <b>${c.confirmPayment?('oui, '+c.confirmDelay+' s après '+(c.confirmTrigger==='recorded'?'l’enregistrement':'la validation')):'non'}</b></div>
+          <div style="font-size:12.5px;color:var(--muted)">Appareil d'envoi : <b>${c.senderDevice?(esc(c.senderDeviceLabel||'désigné')+(isSender?' (cet appareil)':' (un autre appareil)')):'tout appareil ouvert (fondateur / admin / comptable)'}</b></div>
+        </div>
+      </div>
+      ${!waAuto()?`<div style="margin-top:10px;font-size:12px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);border-radius:8px;padding:9px 10px">
+        Pour que les messages partent <b>tout seuls</b>, reliez le numéro WhatsApp du markaz à une passerelle (⚙️ Configurer). En attendant, utilisez les boutons 📲 ci-dessous : WhatsApp s'ouvre avec le message déjà rédigé.</div>`:''}
+      <div id="waProgress" style="margin-top:8px;font-size:12.5px;font-weight:700;color:var(--brand)">${esc(WA_RUN.progress||'')}</div>
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi"><div class="kl">Parents à rappeler</div><div class="kv">${q.items.length}</div></div>
+      <div class="kpi red"><div class="kl">Élèves avec arriérés</div><div class="kv">${debtors.length}</div></div>
+      <div class="kpi red"><div class="kl">Total des arriérés</div><div class="kv" style="font-size:18px">${fmtGNF(totalDebt)}</div></div>
+      <div class="kpi gold"><div class="kl">Élèves sans numéro</div><div class="kv">${q.noPhone.length}</div></div>
+    </div>
+
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0 10px">
+      <b>📋 Messages préparés — mensualité visée : ${esc(monthYearLabel(q.target))}</b>
+    </div>
+    <div id="waQueue">
+    ${q.items.length ? q.items.map((it,i)=>{
+      const l = waLogGet(it.key);
+      return `<div class="card" style="margin-bottom:10px;padding:13px 14px">
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+          <div style="min-width:0"><b>${esc(it.parent||'Parent')}</b> <span style="color:var(--muted);font-size:12px">· +${esc(it.phone)}</span>
+            <div style="font-size:12px;color:var(--muted);margin-top:2px">${it.lines.map(x=>esc(x.s.first_name+' '+x.s.last_name)).join(', ')}</div></div>
+          <div style="text-align:right">${it.type==='dette'?'<span class="badge badge-red">Arriérés</span>':'<span class="badge badge-amber">Mensualité</span>'}
+            <div style="font-weight:800;margin-top:4px;color:${it.type==='dette'?'#b91c1c':'inherit'}">${fmtGNF(it.total)}</div></div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;align-items:center">
+          ${l?stBadge(l.s)+` <span style="font-size:11px;color:var(--muted)">${new Date(l.at).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}</span>`:'<span class="badge badge-slate">Pas encore envoyé aujourd’hui</span>'}
+          <span style="flex:1"></span>
+          <button class="fb fb-ghost fb-sm" onclick="waPreview(${i})">👁️ Message</button>
+          <button class="fb fb-green fb-sm" onclick="waOpenManual(${i})">📲 Envoyer</button>
+        </div>
+      </div>`;}).join('') : `<div class="empty-state"><div class="em">✅</div>Aucun parent à rappeler : tous les élèves payants sont à jour pour ${esc(monthYearLabel(q.target))}.</div>`}
+    </div>
+
+    ${q.noPhone.length?`<div class="card" style="margin:10px 0 14px">
+      <b>⚠️ Élèves sans numéro de parent (${q.noPhone.length})</b>
+      <div style="font-size:12.5px;color:var(--muted);margin-top:6px">${q.noPhone.map(l=>esc(l.s.first_name+' '+l.s.last_name)).join(' · ')}</div>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:6px">Ajoutez le téléphone du tuteur dans la fiche de l'élève pour qu'il reçoive les rappels.</div></div>`:''}
+
+    <div style="margin:18px 0 10px"><b>🕓 Journal des envois</b></div>
+    ${logs.length ? logs.map(l=>`<div class="card" style="margin-bottom:8px;padding:10px 13px">
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+          <div style="min-width:0"><b style="font-size:13px">${esc(typeLbl(l.t))}</b> <span style="color:var(--muted);font-size:12px">· ${esc(l.n||'')} · +${esc(l.p||'')}</span>
+            ${l.e?`<div style="font-size:11.5px;color:#b91c1c;margin-top:2px">${esc(l.e)}</div>`:''}</div>
+          <div style="text-align:right;font-size:12px">${stBadge(l.s)}<div style="color:var(--muted);margin-top:3px">${new Date(l.at).toLocaleString('fr-FR')}</div></div>
+        </div></div>`).join('')
+      : `<div class="empty-state" style="padding:24px"><div class="em">📭</div>Aucun envoi pour l'instant.</div>`}`;
+  window._waQueue = q.items;
+}
+function waPreview(i){
+  const it = (window._waQueue||[])[i]; if (!it) return;
+  openModal(`<h3>👁️ Message pour ${esc(it.parent||'le parent')}</h3>
+    <pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;max-height:55vh;overflow:auto">${esc(it.text)}</pre>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="fb fb-green" style="flex:1" onclick="waOpenManual(${i})">📲 Envoyer</button>
+      <button class="fb fb-ghost" onclick="closeModal()">Fermer</button></div>`);
+}
+/** Envoi unitaire : par la passerelle si elle est active, sinon ouverture de WhatsApp. */
+async function waOpenManual(i){
+  const it = (window._waQueue||[])[i]; if (!it) return;
+  closeModal();
+  if (waAuto()){
+    const prev = waLogGet(it.key);
+    if (prev && prev.s==='ok' && !confirm('Ce parent a déjà reçu le rappel aujourd’hui. Renvoyer ?')) return;
+    if (prev) delete DB.waLog[it.key];
+    toast('Envoi en cours…');
+    const r = await waDeliver(it.key, it.phone, it.text, { t: it.type, n: it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', '), m: it.total });
+    toast(r==='ok' ? '✅ Message envoyé.' : r==='nowa' ? 'ℹ️ Ce numéro n’a pas WhatsApp.' : '⚠️ Échec de l’envoi — voir le journal.');
+  } else {
+    window.open('https://wa.me/' + it.phone + '?text=' + encodeURIComponent(it.text), '_blank');
+    waLogSet(it.key, { t: it.type, p: it.phone, s: 'manual', n: it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', '), m: it.total });
+  }
+  if (currentPage==='whatsapp') renderWhatsApp();
+}
+function waManualRun(){
+  if (!waAuto()){ toast('Mode assisté : utilisez le bouton 📲 de chaque parent, ou configurez une passerelle.', 4500); return; }
+  if (!confirm('Envoyer maintenant les rappels à tous les parents de la liste (ceux qui l’ont déjà reçu aujourd’hui sont ignorés) ?')) return;
+  waRunReminders(true);
+  setTimeout(()=>{ if (currentPage==='whatsapp') renderWhatsApp(); }, 300);
+}
+
+/* ---- Configuration WhatsApp ---- */
+let WA_EDIT = null;
+function openWaConfig(){
+  if (!isAdminOrAbove()){ toast('Réservé au fondateur / administrateur.'); return; }
+  WA_EDIT = waCfg();
+  renderWaConfigModal();
+}
+function waCollect(){
+  const f = WA_EDIT; if (!f) return;
+  const v = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
+  const ck = id => { const el = document.getElementById(id); return el ? !!el.checked : undefined; };
+  ['provider','apiUrl','idInstance','apiToken','ultraInstance','ultraToken','customUrl','customAuth','countryCode','hour','confirmTrigger','intro','footer']
+    .forEach(k=>{ const x = v('wa_'+k); if (x !== undefined) f[k] = String(x).trim(); });
+  ['enabled','remindUpcoming','remindDebt','confirmPayment','checkNumbers'].forEach(k=>{ const x = ck('wa_'+k); if (x !== undefined) f[k] = x; });
+  const dl = v('wa_confirmDelay'); if (dl !== undefined) f.confirmDelay = Math.max(0, nNum(dl,5));
+  const gp = v('wa_gap'); if (gp !== undefined) f.gap = Math.max(2, nNum(gp,4));
+  const days = Array.from(document.querySelectorAll('.waDayChk')); if (days.length) f.days = days.filter(x=>x.checked).map(x=>Number(x.value));
+}
+function renderWaConfigModal(){
+  const f = WA_EDIT;
+  const box = 'background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:12px 13px;margin-bottom:12px';
+  const isSender = f.senderDevice && f.senderDevice === waDeviceId();
+  openModal(`
+    <h3 style="margin-bottom:4px">📲 Rappels WhatsApp automatiques</h3>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Les messages partent depuis le numéro WhatsApp du markaz relié à la passerelle choisie.</p>
+
+    <label style="display:flex;gap:8px;align-items:center;font-weight:700;margin-bottom:12px"><input type="checkbox" id="wa_enabled" ${f.enabled?'checked':''}> Activer les envois automatiques</label>
+
+    <div style="${box}">
+      <div class="fl" style="margin-bottom:8px">🔌 Passerelle WhatsApp</div>
+      <select class="fi" id="wa_provider" onchange="waCollect();renderWaConfigModal()">
+        <option value="manual" ${f.provider==='manual'?'selected':''}>Mode assisté — sans passerelle (un clic par parent)</option>
+        <option value="greenapi" ${f.provider==='greenapi'?'selected':''}>Green-API (recommandé)</option>
+        <option value="ultramsg" ${f.provider==='ultramsg'?'selected':''}>UltraMsg</option>
+        <option value="custom" ${f.provider==='custom'?'selected':''}>Passerelle personnalisée (URL)</option>
+      </select>
+      ${f.provider==='greenapi'?`
+        <div class="fg" style="margin-top:10px"><label class="fl">apiUrl</label><input class="fi" id="wa_apiUrl" value="${esc(f.apiUrl)}"></div>
+        <div class="fg2"><div class="fg"><label class="fl">idInstance</label><input class="fi" id="wa_idInstance" value="${esc(f.idInstance)}"></div>
+        <div class="fg"><label class="fl">apiTokenInstance</label><input class="fi" type="password" id="wa_apiToken" value="${esc(f.apiToken)}"></div></div>
+        <div style="font-size:11.5px;color:var(--muted)">Créez une instance sur green-api.com, scannez le QR code avec le WhatsApp du markaz, puis copiez ici les 3 valeurs affichées.</div>`:''}
+      ${f.provider==='ultramsg'?`
+        <div class="fg2" style="margin-top:10px"><div class="fg"><label class="fl">Instance ID</label><input class="fi" id="wa_ultraInstance" value="${esc(f.ultraInstance)}" placeholder="instance12345"></div>
+        <div class="fg"><label class="fl">Token</label><input class="fi" type="password" id="wa_ultraToken" value="${esc(f.ultraToken)}"></div></div>
+        <div style="font-size:11.5px;color:var(--muted)">Créez une instance sur ultramsg.com et scannez le QR code avec le WhatsApp du markaz.</div>`:''}
+      ${f.provider==='custom'?`
+        <div class="fg" style="margin-top:10px"><label class="fl">URL (reçoit un POST JSON {phone, message, markaz})</label><input class="fi" id="wa_customUrl" value="${esc(f.customUrl)}" placeholder="https://…"></div>
+        <div class="fg"><label class="fl">En-tête Authorization (facultatif)</label><input class="fi" type="password" id="wa_customAuth" value="${esc(f.customAuth)}" placeholder="Bearer …"></div>`:''}
+      ${f.provider!=='manual'?`
+        <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-top:6px"><input type="checkbox" id="wa_checkNumbers" ${f.checkNumbers?'checked':''}> Vérifier que chaque numéro possède un compte WhatsApp avant l'envoi</label>
+        <div style="display:flex;gap:6px;margin-top:10px">
+          <input class="fi" id="waTestPhone" placeholder="N° de test (ex : 623030403)" style="flex:1">
+          <button type="button" class="fb fb-ghost fb-sm" onclick="waTestSend()">🧪 Tester</button>
+        </div>`:''}
+      <div class="fg2" style="margin-top:10px">
+        <div class="fg"><label class="fl">Indicatif pays</label><input class="fi" id="wa_countryCode" value="${esc(f.countryCode)}" placeholder="224"></div>
+        <div class="fg"><label class="fl">Pause entre 2 messages (s)</label><input class="fi" type="number" min="2" id="wa_gap" value="${f.gap}"></div>
+      </div>
+    </div>
+
+    <div style="${box}">
+      <div class="fl" style="margin-bottom:8px">🔔 Rappels de paiement</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Jours du mois où les rappels partent :</div>
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:10px">
+        ${Array.from({length:31},(_,i)=>i+1).map(dn=>`<label style="display:flex;flex-direction:column;align-items:center;font-size:11px;padding:3px;border:1px solid var(--line);border-radius:6px;${f.days.includes(dn)?'background:rgba(22,163,74,.12)':''}">
+          <input type="checkbox" class="waDayChk" value="${dn}" ${f.days.includes(dn)?'checked':''}>${dn}</label>`).join('')}
+      </div>
+      <div class="fg"><label class="fl">À partir de l'heure</label><input class="fi" type="time" id="wa_hour" value="${esc(f.hour)}"></div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-bottom:6px"><input type="checkbox" id="wa_remindUpcoming" ${f.remindUpcoming?'checked':''}> Rappeler la mensualité aux parents à jour (le 28 : mois suivant ; du 1 au 10 : mois en cours)</label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input type="checkbox" id="wa_remindDebt" ${f.remindDebt?'checked':''}> Relancer les parents ayant des dettes, avec le détail des mois et le montant</label>
+    </div>
+
+    <div style="${box}">
+      <div class="fl" style="margin-bottom:8px">✅ Confirmation de paiement</div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-bottom:8px"><input type="checkbox" id="wa_confirmPayment" ${f.confirmPayment?'checked':''}> Envoyer automatiquement la confirmation au parent</label>
+      <div class="fg2">
+        <div class="fg"><label class="fl">Délai (secondes)</label><input class="fi" type="number" min="0" id="wa_confirmDelay" value="${f.confirmDelay}"></div>
+        <div class="fg"><label class="fl">Déclencheur</label><select class="fi" id="wa_confirmTrigger">
+          <option value="approved" ${f.confirmTrigger==='approved'?'selected':''}>Paiement validé (fondateur / admin)</option>
+          <option value="recorded" ${f.confirmTrigger==='recorded'?'selected':''}>Dès la saisie, même par le comptable</option></select></div>
+      </div>
+    </div>
+
+    <div style="${box}">
+      <div class="fl" style="margin-bottom:8px">✍️ Formules des messages</div>
+      <div class="fg"><label class="fl">Salutation</label><input class="fi" id="wa_intro" value="${esc(f.intro)}"></div>
+      <div class="fg"><label class="fl">Formule de fin</label><input class="fi" id="wa_footer" value="${esc(f.footer)}"></div>
+    </div>
+
+    <div style="${box}">
+      <div class="fl" style="margin-bottom:6px">📌 Appareil d'envoi</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Les rappels partent depuis un appareil où l'application est ouverte et connectée. Désignez de préférence un appareil qui reste allumé (ex : le téléphone ou l'ordinateur du bureau).</div>
+      <div style="font-size:12.5px;margin-bottom:8px">Actuel : <b>${f.senderDevice?(esc(f.senderDeviceLabel||'désigné')+(isSender?' — cet appareil':' — un autre appareil')):'Tout appareil ouvert'}</b></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button type="button" class="fb fb-ghost fb-sm" onclick="waSetSenderHere()">📌 Désigner cet appareil</button>
+        ${f.senderDevice?`<button type="button" class="fb fb-ghost fb-sm" onclick="waCollect();WA_EDIT.senderDevice='';WA_EDIT.senderDeviceLabel='';renderWaConfigModal()">↺ Tout appareil</button>`:''}
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px">
+      <button class="fb fb-gold" style="flex:1" onclick="saveWaConfig()">💾 Enregistrer</button>
+      <button class="fb fb-ghost" onclick="closeModal()">Annuler</button>
+    </div>`);
+}
+function waSetSenderHere(){
+  waCollect();
+  const u = currentUser() || {};
+  const ua = navigator.userAgent || '';
+  const kind = /Android|iPhone|iPad|Mobile/i.test(ua) ? 'Téléphone' : 'Ordinateur';
+  WA_EDIT.senderDevice = waDeviceId();
+  WA_EDIT.senderDeviceLabel = kind + ' de ' + ((u.first_name||'') + ' ' + (u.last_name||'')).trim();
+  renderWaConfigModal();
+  toast('Cet appareil sera l’appareil d’envoi (pensez à enregistrer).');
+}
+function saveWaConfig(){
+  if (!isAdminOrAbove()) return;
+  waCollect();
+  const f = nClone(WA_EDIT);
+  if (!f.days.length){ toast('Cochez au moins un jour de rappel.'); return; }
+  if (f.enabled && f.provider==='greenapi' && (!f.idInstance || !f.apiToken)){ toast('Renseignez idInstance et apiTokenInstance.'); return; }
+  if (f.enabled && f.provider==='ultramsg' && (!f.ultraInstance || !f.ultraToken)){ toast('Renseignez l’instance et le token UltraMsg.'); return; }
+  if (f.enabled && f.provider==='custom' && !f.customUrl){ toast('Renseignez l’URL de la passerelle.'); return; }
+  const old = DB.waConfig || {};
+  // Date d'activation : seuls les paiements validés APRÈS l'activation déclenchent une confirmation
+  // (on n'envoie jamais de confirmations pour l'historique déjà existant).
+  f.activatedAt = (f.enabled && !(old.enabled)) ? Date.now() : (old.activatedAt || (f.enabled ? Date.now() : 0));
+  DB.waConfig = f;
+  saveDB();
+  logAction('Rappels WhatsApp', 'Configuration mise à jour (' + (f.enabled?'activé':'désactivé') + ', ' + f.provider + ')');
+  closeModal();
+  toast('✅ Réglages WhatsApp enregistrés.');
+  if (currentPage==='whatsapp') renderWhatsApp(); else if (currentPage==='settings') renderSettings();
+}
+async function waTestSend(){
+  waCollect();
+  const raw = (document.getElementById('waTestPhone')||{}).value;
+  const saved = DB.waConfig;
+  DB.waConfig = nClone(WA_EDIT);          // test avec les valeurs saisies (non enregistrées)
+  try {
+    const phone = waNormPhone(raw);
+    if (!phone){ toast('Numéro de test invalide.'); return; }
+    toast('Test en cours…');
+    const has = await waHasWhatsApp(phone);
+    if (has === false){ toast('ℹ️ Ce numéro n’a pas de compte WhatsApp.'); return; }
+    await waApiSend(phone, `✅ *${DB.centerName||'AGM'}* — Test de la passerelle WhatsApp réussi.`);
+    toast('✅ Message de test envoyé à +' + phone, 4000);
+  } catch(e){
+    toast('⚠️ Échec : ' + (e && e.message || e) + ' — vérifiez les identifiants.', 6000);
+  } finally {
+    DB.waConfig = saved;
+  }
+}
+/** Carte de rappel dans Réglages. */
+function waSettingsCardHtml(){
+  if (!['fondateur','admin','comptable'].includes((currentUser()||{}).role)) return '';
+  const c = waCfg();
+  return `<div class="card" style="margin-bottom:16px;border-left:4px solid ${waAuto()?'#16a34a':'#f59e0b'}">
+    <b>📲 Rappels WhatsApp automatiques</b>
+    <div style="font-size:12px;color:var(--muted);margin:4px 0 10px">${waAuto()?'Actifs — rappels les '+c.days.join(', ')+' du mois, confirmations de paiement '+(c.confirmPayment?'activées':'désactivées')+'.':'Inactifs — configurez la passerelle WhatsApp du markaz.'}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      ${isAdminOrAbove()?`<button class="fb fb-gold fb-sm" onclick="openWaConfig()">⚙️ Configurer</button>`:''}
+      <button class="fb fb-ghost fb-sm" onclick="navigate('whatsapp')">📋 Ouvrir les rappels</button>
+    </div></div>`;
+}
+
+/* =====================================================================
+   3) DETTES — recherche, cartes lisibles sur téléphone, bilans imprimables
+   ===================================================================== */
+let DETTE_SEARCH = '';
+let DETTE_FILTER = 'debt';   // 'debt' = avec dette · 'all' = tous les élèves payants
+function detteData(){
+  return nPayingStudents().map(s=>{
+    const ledger = studentDebtLedger(s.id);
+    const unpaid = ledger.filter(m=>m.status==='impayé' || m.status==='partiel');
+    return { s, ledger, unpaid, totalDue: ledger.reduce((a,m)=>a+m.balance,0), totalPaid: ledger.reduce((a,m)=>a+Math.min(m.paid, m.due||m.paid),0) };
+  });
+}
+function detteFiltered(){
+  const q = (DETTE_SEARCH||'').trim().toLowerCase();
+  return detteData().filter(r=>{
+    if (DETTE_FILTER === 'debt' && r.totalDue <= 0) return false;
+    if (!q) return true;
+    const s = r.s;
+    return [s.first_name+' '+s.last_name, s.last_name+' '+s.first_name, s.matricule, s.guardian_name, s.guardian_phone]
+      .join(' ').toLowerCase().includes(q);
+  }).sort((a,b)=>b.totalDue-a.totalDue || (a.s.first_name+a.s.last_name).localeCompare(b.s.first_name+b.s.last_name));
+}
+function openDettesModal(){
+  ensureExt();
+  openModal(`
+    <h3 style="margin:0 0 4px">📋 Dettes de scolarité</h3>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">Élèves au statut « payant » — mois dus depuis leur inscription.</p>
+    <input class="fi" id="detteSearchInput" autocomplete="off" placeholder="🔎 Rechercher un élève : nom, matricule, tuteur, téléphone…"
+      value="${esc(DETTE_SEARCH)}" oninput="DETTE_SEARCH=this.value;renderDettesList()">
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0">
+      <select class="fi" style="flex:1;min-width:150px" onchange="DETTE_FILTER=this.value;renderDettesList()">
+        <option value="debt" ${DETTE_FILTER==='debt'?'selected':''}>Seulement les élèves endettés</option>
+        <option value="all" ${DETTE_FILTER==='all'?'selected':''}>Tous les élèves payants</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+      <button class="fb fb-gold fb-sm" style="flex:1" onclick="printBilanGeneral()">🖨️ Bilan général</button>
+      <button class="fb fb-ghost fb-sm" style="flex:1" onclick="printBilansIndividuels()">🖨️ Bilans individuels</button>
+    </div>
+    <div id="detteSummary" style="font-size:12.5px;margin-bottom:8px"></div>
+    <div id="dettesList" style="max-height:50vh;overflow:auto;padding-right:2px"></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="fb fb-ghost" style="flex:1" onclick="closeModal()">Fermer</button>
+    </div>`);
+  renderDettesList();
+}
+function renderDettesList(){
+  const list = detteFiltered();
+  const wrap = document.getElementById('dettesList'); if (!wrap) return;
+  const tot = list.reduce((a,r)=>a+r.totalDue,0);
+  const sum = document.getElementById('detteSummary');
+  if (sum) sum.innerHTML = `<b>${list.length}</b> élève(s)${DETTE_SEARCH.trim()?' trouvé(s)':''} — total dû : <b style="color:#b91c1c">${fmtGNF(tot)}</b>`;
+  wrap.innerHTML = list.length ? list.map(r=>{
+    const s = r.s;
+    return `<div style="border:1px solid var(--line);border-left:4px solid ${r.totalDue>0?'#dc2626':'#16a34a'};border-radius:10px;padding:10px 12px;margin-bottom:8px;background:var(--panel)">
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <div style="min-width:0"><b>${esc(s.first_name+' '+s.last_name)}</b>
+          <div style="font-size:11.5px;color:var(--muted)">${esc(s.matricule||'')} · ${s.category==='internat'?'Internat':'Externat'}${s.guardian_name?' · '+esc(s.guardian_name):''}${s.guardian_phone?' · '+esc(s.guardian_phone):''}</div></div>
+        <div style="text-align:right;white-space:nowrap"><div style="font-weight:800;color:${r.totalDue>0?'#b91c1c':'#15803d'}">${fmtGNF(r.totalDue)}</div>
+          <div style="font-size:11px;color:var(--muted)">${r.unpaid.length} mois en retard</div></div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+        <button class="fb fb-ghost fb-sm" onclick="openStudentLedger('${s.id}')">📅 Détail</button>
+        <button class="fb fb-ghost fb-sm" onclick="printBilanDette('${s.id}')">🖨️ Bilan</button>
+        ${r.totalDue>0 && s.guardian_phone?`<button class="fb fb-green fb-sm" onclick="waDebtReminderOne('${s.id}')">📲 Rappel</button>`:''}
+        ${r.totalDue>0?`<button class="fb fb-gold fb-sm" onclick="closeModal();openPaymentForm('${s.id}','${(r.unpaid[0]||{}).ym||''}',${(r.unpaid[0]||{}).balance||0})">💰 Verser</button>`:''}
+      </div>
+    </div>`;
+  }).join('') : `<div class="empty-state" style="padding:26px"><div class="em">${DETTE_SEARCH.trim()?'🔎':'✅'}</div>${DETTE_SEARCH.trim()?'Aucun élève ne correspond à « '+esc(DETTE_SEARCH)+' ».':'Aucune dette : tous les élèves payants sont à jour.'}</div>`;
+}
+function openStudentLedger(studentId){
+  const s = DB.students.find(x=>x.id===studentId); if(!s) return;
+  const ledger = studentDebtLedger(studentId);
+  const total = ledger.reduce((a,m)=>a+m.balance,0);
+  const badge = st => st==='payé' ? '<span class="badge badge-green">Payé</span>'
+    : st==='partiel' ? '<span class="badge badge-amber">Partiel</span>'
+    : st==='impayé' ? '<span class="badge badge-red">Impayé</span>'
+    : '<span class="badge badge-slate">—</span>';
+  const rows = ledger.slice().reverse().map(mo=>`
+    <div style="border:1px solid var(--line);border-radius:9px;padding:9px 11px;margin-bottom:6px;background:var(--panel)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <b style="font-size:13px">${esc(mo.label)}</b>${badge(mo.status)}
+      </div>
+      <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--muted);margin-top:4px;flex-wrap:wrap">
+        <span>Dû : <b>${fmtGNF(mo.due)}</b></span><span>Payé : <b>${fmtGNF(mo.paid)}</b></span>${mo.balance>0?`<span style="color:#b91c1c">Reste : <b>${fmtGNF(mo.balance)}</b></span>`:''}
+      </div>
+      ${mo.balance>0?`<button class="fb fb-green fb-sm" style="width:100%;margin-top:7px" onclick="closeModal();openPaymentForm('${studentId}','${mo.ym}',${mo.balance})">💰 Verser ${fmtGNF(mo.balance)}</button>`:''}
+    </div>`).join('');
+  openModal(`
+    <h3 style="margin:0 0 4px">📅 Scolarité — ${esc(s.first_name+' '+s.last_name)}</h3>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 6px">Matricule ${esc(s.matricule)} — mensualité ${fmtGNF(s.monthly_fee)}</p>
+    <p style="font-size:13px;margin:0 0 12px">Total restant dû : <b style="color:${total>0?'#b91c1c':'#15803d'}">${fmtGNF(total)}</b></p>
+    <div style="max-height:46vh;overflow:auto">${rows||'<div class="empty-state">—</div>'}</div>
+    <div style="display:flex;gap:6px;margin-top:12px;flex-wrap:wrap">
+      <button class="fb fb-gold fb-sm" style="flex:1" onclick="printBilanDette('${studentId}')">🖨️ Imprimer le bilan</button>
+      ${total>0 && s.guardian_phone?`<button class="fb fb-green fb-sm" style="flex:1" onclick="waDebtReminderOne('${studentId}')">📲 Rappel WhatsApp</button>`:''}
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="fb fb-ghost" style="flex:1" onclick="openDettesModal()">← Retour</button>
+      <button class="fb fb-ghost" onclick="closeModal()">Fermer</button>
+    </div>`);
+}
+/** Relance individuelle d'un parent endetté (passerelle si active, sinon WhatsApp direct). */
+async function waDebtReminderOne(studentId){
+  const s = DB.students.find(x=>x.id===studentId); if (!s) return;
+  const phone = waNormPhone(s.guardian_phone);
+  if (!phone){ toast('Aucun numéro de tuteur pour cet élève.'); return; }
+  const target = nTodayYM();
+  const sit = nDebtSituation(s, target + '-99');
+  const g = { phone, parent: s.guardian_name||'', lines: [{ s, arrears: sit.arrears, arrearsAmount: sit.totalDue, target, dueT: 0 }] };
+  const text = waReminderText(g, sit.totalDue, true);
+  if (waAuto()){
+    toast('Envoi en cours…');
+    const key = waDayKey() + '_one_' + s.id + '_' + Date.now().toString(36);
+    const r = await waDeliver(key, phone, text, { t:'dette', n: s.first_name+' '+s.last_name, m: sit.totalDue });
+    toast(r==='ok' ? '✅ Rappel envoyé au parent.' : r==='nowa' ? 'ℹ️ Ce numéro n’a pas WhatsApp.' : '⚠️ Échec de l’envoi.');
+  } else {
+    window.open('https://wa.me/' + phone + '?text=' + encodeURIComponent(text), '_blank');
+  }
+}
+
+/* ---- Moteur d'impression multi-pages (même charte que printA4) ---- */
+function nPrintPages(title, pages, opts){
+  ensureExt();
+  const o = opts || {};
+  const logo = DB.centerLogo || AGM_LOGO;
+  const w = window.open('', '_blank', 'width=1000,height=1000');
+  if (!w){ toast('Autorisez les fenêtres pop-up pour imprimer.'); return null; }
+  const head = sub => `<div class="hdr"><img src="${logo}" onerror="this.style.display='none'">
+      <div><div class="nm">${esc(DB.centerName||'AGM')}</div>
+      <div class="ad">${esc(DB.centerAddress||'')}${DB.centerPhone?' · '+esc(DB.centerPhone):''}</div></div></div>`;
+  const html = `<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>${esc(title)}</title>
+  <style>${a4Styles()}
+    .pg{page-break-after:always;break-after:page} .pg:last-child{page-break-after:auto;break-after:auto}
+    .st-ok{color:#15803d;font-weight:800} .st-pa{color:#b45309;font-weight:800} .st-ko{color:#b91c1c;font-weight:800}
+    .amount-box{border:2px solid ${nThemeColor()};border-radius:8px;padding:10px 12px;margin:14px 0;font-size:11.5px;background:#f7faf8}
+    .amount-box b.big{font-size:16px;color:#b91c1c}
+    ${o.css||''}
+  </style></head><body>
+  <div class="noprint">
+    <button onclick="window.print()">🖨️ Imprimer / Enregistrer en PDF</button>
+    ${o.shareText?`<button onclick="wa()">📲 Envoyer au tuteur (WhatsApp)</button>`:''}
+  </div>
+  ${pages.map(p=>`<div class="sheet pg">${head()}<div class="doc-title">${esc(p.title||title)}</div><div class="doc-sub">${esc(p.subtitle||'')}</div>${p.body}
+     ${p.sg!==false?`<div class="sg"><div>${esc(p.sgLeft||'Le comptable')}</div><div>${esc(p.sgRight||'Le fondateur')}</div></div>`:''}
+     <div class="ft">Édité le ${new Date().toLocaleString('fr-FR')} — ${esc(DB.centerName||'AGM')} · Document généré automatiquement</div></div>`).join('')}
+  <scr`+`ipt>function wa(){ window.open('https://wa.me/'+${JSON.stringify(waNormPhone(o.phone||''))}+'?text='+encodeURIComponent(${JSON.stringify(o.shareText||'')}),'_blank'); }</scr`+`ipt>
+  </body></html>`;
+  w.document.write(html); w.document.close();
+  return w;
+}
+
+/** Contenu du bilan de dettes d'un élève. */
+function bilanDettePage(s){
+  const ledger = studentDebtLedger(s.id);
+  const due = ledger.reduce((a,m)=>a+m.due,0);
+  const paid = ledger.reduce((a,m)=>a+Math.min(m.paid, m.due||m.paid),0);
+  const rest = ledger.reduce((a,m)=>a+m.balance,0);
+  const unpaid = ledger.filter(m=>m.balance>0);
+  const stCls = st => st==='payé'?'st-ok':(st==='partiel'?'st-pa':'st-ko');
+  const stLbl = st => st==='payé'?'✔ Payé':(st==='partiel'?'◐ Partiel':(st==='impayé'?'✖ Impayé':'—'));
+  const pays = (DB.payments||[]).filter(p=>p.student_id===s.id && p.status!=='rejected' && p.label==='Frais de scolarité')
+    .sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  const body = `
+    <div class="sec">Identité de l'élève</div>
+    ${a4WithPhoto(s.photo, a4Table(['Élève','Matricule','Catégorie','Tuteur','Téléphone'],
+      [[`<b>${esc(s.first_name+' '+s.last_name)}</b>`, esc(s.matricule||'—'), s.category==='internat'?'Internat':'Externat',
+        esc(s.guardian_name||'—'), esc(s.guardian_phone||'—')]]) +
+      a4Table(["Date d'inscription",'Mensualité','Période suivie'],
+      [[s.enrollment_date?nDateFr(s.enrollment_date):'—', fmtGNF(s.monthly_fee),
+        ledger.length ? esc(ledger[0].label + ' → ' + ledger[ledger.length-1].label) : '—']]))}
+    ${a4Kpis([{l:'Mois suivis',v:ledger.length},{l:'Mois impayés / partiels',v:unpaid.length},
+              {l:'Total payé',v:fmtGNF(paid)},{l:'Reste à payer',v:`<span style="color:#b91c1c">${fmtGNF(rest)}</span>`}])}
+    <div class="sec">Situation mois par mois</div>
+    ${a4Table(['Mois','Montant dû','Montant payé','Reste','Statut'],
+      ledger.map(m=>[esc(m.label), fmtGNF(m.due), fmtGNF(m.paid), m.balance>0?`<b style="color:#b91c1c">${fmtGNF(m.balance)}</b>`:'—', `<span class="${stCls(m.status)}">${stLbl(m.status)}</span>`]),
+      ['<b>TOTAL</b>', `<b>${fmtGNF(due)}</b>`, `<b>${fmtGNF(paid)}</b>`, `<b style="color:#b91c1c">${fmtGNF(rest)}</b>`, ''])}
+    ${pays.length?`<div class="sec">Versements enregistrés (scolarité)</div>
+    ${a4Table(['Date','N° reçu','Mois couverts','Statut','Montant'],
+      pays.map(p=>[esc(p.date||''), esc(p.receipt_no||'—'), esc(paymentMonthsLabel(p)||'—'), p.status==='approved'?'Validé':'En attente', `<b>${fmtGNF(p.amount)}</b>`]))}`:''}
+    <div class="amount-box">
+      ${rest>0
+        ? `Arrêté le présent bilan à la somme de : <b class="big">${fmtGNF(rest)}</b><br>
+           <i>(${esc(nombreEnLettres(rest))} francs guinéens)</i> restant dus pour <b>${unpaid.length}</b> mois : ${esc(unpaid.map(m=>m.label).join(', '))}.`
+        : `<b style="color:#15803d">L'élève est à jour de sa scolarité à la date du ${nDateFr(new Date())}.</b>`}
+    </div>`;
+  return { title:'Bilan des dettes de scolarité', subtitle: `${s.first_name} ${s.last_name} — arrêté au ${nDateFr(new Date())}`, body,
+           sgLeft:'Le comptable', sgRight:'Le fondateur', rest };
+}
+function printBilanDette(studentId){
+  const s = DB.students.find(x=>x.id===studentId); if (!s) return;
+  const pg = bilanDettePage(s);
+  let share = '';
+  if (pg.rest > 0){
+    const sit = nDebtSituation(s, nTodayYM()+'-99');
+    share = waReminderText({ phone:'', parent:s.guardian_name||'', lines:[{ s, arrears:sit.arrears, arrearsAmount:sit.totalDue, target:nTodayYM(), dueT:0 }] }, sit.totalDue, true);
+  }
+  nPrintPages('Bilan des dettes — ' + s.first_name + ' ' + s.last_name, [pg], { shareText: share, phone: s.guardian_phone });
+}
+function printBilansIndividuels(){
+  const list = detteFiltered().filter(r=>r.totalDue>0);
+  if (!list.length){ toast('Aucun élève endetté dans la liste.'); return; }
+  nPrintPages('Bilans individuels des dettes', list.map(r=>bilanDettePage(r.s)));
+}
+function printBilanGeneral(){
+  const list = detteFiltered().filter(r=>r.totalDue>0);
+  if (!list.length){ toast('Aucun élève endetté dans la liste.'); return; }
+  const tot = list.reduce((a,r)=>a+r.totalDue,0);
+  const months = list.reduce((a,r)=>a+r.unpaid.length,0);
+  const int = list.filter(r=>r.s.category==='internat'), ext = list.filter(r=>r.s.category!=='internat');
+  const body = `
+    ${a4Kpis([{l:'Élèves endettés',v:list.length},{l:'Mois impayés cumulés',v:months},
+              {l:'Total des dettes',v:`<span style="color:#b91c1c">${fmtGNF(tot)}</span>`},
+              {l:'Dette moyenne',v:fmtGNF(tot/list.length)}])}
+    ${a4Kpis([{l:'Internat',v:int.length+' élève(s) — '+fmtGNF(int.reduce((a,r)=>a+r.totalDue,0))},
+              {l:'Externat',v:ext.length+' élève(s) — '+fmtGNF(ext.reduce((a,r)=>a+r.totalDue,0))}])}
+    <div class="sec">Liste des élèves endettés (du plus grand montant au plus petit)</div>
+    ${a4Table(['N°','Élève','Matricule','Cat.','Tuteur','Téléphone','Mois dus','Montant dû'],
+      list.map((r,i)=>[i+1, `<b>${esc(r.s.first_name+' '+r.s.last_name)}</b>`, esc(r.s.matricule||'—'),
+        r.s.category==='internat'?'Int.':'Ext.', esc(r.s.guardian_name||'—'), esc(r.s.guardian_phone||'—'),
+        `<span title="${esc(r.unpaid.map(m=>m.label).join(', '))}">${r.unpaid.length}</span>`, `<b style="color:#b91c1c">${fmtGNF(r.totalDue)}</b>`]),
+      ['','<b>TOTAL</b>','','','','',`<b>${months}</b>`,`<b>${fmtGNF(tot)}</b>`])}
+    <div class="amount-box">Arrêté le présent bilan général à la somme de <b class="big">${fmtGNF(tot)}</b>
+      <i>(${esc(nombreEnLettres(tot))} francs guinéens)</i> dus par <b>${list.length}</b> élève(s).</div>`;
+  nPrintPages('Bilan général des dettes', [{ title:'Bilan général des dettes de scolarité',
+    subtitle: 'Arrêté au ' + nDateFr(new Date()) + (DETTE_SEARCH.trim() ? ' — filtre : « ' + DETTE_SEARCH.trim() + ' »' : ''),
+    body, sgLeft:'Le comptable', sgRight:'Le fondateur' }]);
+}
+
+/* =====================================================================
+   5) CARTES DE PAIEMENT — 2 exemplaires (comptable + parent) sur A4 paysage
+   ===================================================================== */
+const CARTE = { year: new Date().getFullYear(), cat: 'all', q: '', prefill: true, gracies: false, sel: {} };
+function cartesStudents(){
+  const q = (CARTE.q||'').trim().toLowerCase();
+  return (DB.students||[]).filter(s=>s.status!=='non_actif')
+    .filter(s=>CARTE.gracies || paymentStatusOf(s)==='payant')
+    .filter(s=>CARTE.cat==='all' || s.category===CARTE.cat)
+    .filter(s=>!q || [s.first_name+' '+s.last_name, s.matricule, s.guardian_name, s.guardian_phone].join(' ').toLowerCase().includes(q))
+    .sort((a,b)=>(a.first_name+' '+a.last_name).localeCompare(b.first_name+' '+b.last_name));
+}
+/** Statut d'un mois sur la carte : payé / partiel / impayé / à venir / avant inscription. */
+function carteMonthState(s, ym, paidMap){
+  const fee = Number(s.monthly_fee)||0;
+  const paid = (paidMap||nPaidByMonth(s.id))[ym] || 0;
+  const enr = s.enrollment_date ? String(s.enrollment_date).slice(0,7) : '0000-00';
+  const cur = nTodayYM();
+  let st;
+  if (paid > 0 && (fee <= 0 || paid >= fee)) st = 'paye';
+  else if (paid > 0) st = 'partiel';
+  else if (ym < enr) st = 'avant';
+  else if (ym > cur) st = 'avenir';
+  else st = fee > 0 ? 'impaye' : 'avenir';
+  return { st, paid, fee, balance: Math.max(0, fee - paid) };
+}
+const CARTE_COL = { paye:'#16a34a', partiel:'#f59e0b', impaye:'#dc2626', avenir:'#cbd5e1', avant:'#e5e7eb' };
+
+function renderCartesPaiement(){
+  const list = cartesStudents();
+  const yOpts = [CARTE.year-2, CARTE.year-1, CARTE.year, CARTE.year+1].filter((v,i,a)=>a.indexOf(v)===i)
+    .map(y=>`<option value="${y}" ${y===CARTE.year?'selected':''}>${y}</option>`).join('');
+  const nSel = Object.keys(CARTE.sel).filter(k=>CARTE.sel[k]).length;
+  document.getElementById('pageContent').innerHTML = `
+    ${pageHead('Cartes de paiement', 'Carte annuelle en 2 exemplaires — un pour le comptable, un pour le parent (A4 paysage)',
+      `<button class="fb fb-gold" onclick="printCartesSelection()">🖨️ Imprimer la sélection (<span id="carteSelCount">${nSel}</span>)</button>`)}
+    <div class="search-bar" style="gap:8px;flex-wrap:wrap">
+      <select class="fi" style="max-width:110px" onchange="CARTE.year=Number(this.value);renderCartesPaiement()">${yOpts}</select>
+      <select class="fi" style="max-width:150px" onchange="CARTE.cat=this.value;renderCartesPaiement()">
+        <option value="all" ${CARTE.cat==='all'?'selected':''}>Toutes catégories</option>
+        <option value="internat" ${CARTE.cat==='internat'?'selected':''}>Internat</option>
+        <option value="externat" ${CARTE.cat==='externat'?'selected':''}>Externat</option>
+      </select>
+      <input class="fi" id="carteSearch" placeholder="🔎 Rechercher un élève…" value="${esc(CARTE.q)}" oninput="CARTE.q=this.value;clearTimeout(window._carteT);window._carteT=setTimeout(renderCartesList,150)">
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;margin-bottom:12px;align-items:center">
+      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" ${CARTE.prefill?'checked':''} onchange="CARTE.prefill=this.checked"> Pré-remplir les mois déjà payés</label>
+      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" ${CARTE.gracies?'checked':''} onchange="CARTE.gracies=this.checked;renderCartesPaiement()"> Inclure les élèves graciés</label>
+      <span style="flex:1"></span>
+      <button class="fb fb-ghost fb-sm" onclick="carteSelectAll(true)">☑ Tout sélectionner</button>
+      <button class="fb fb-ghost fb-sm" onclick="carteSelectAll(false)">☐ Aucun</button>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);margin-bottom:10px">
+      <span><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${CARTE_COL.paye}"></span> Payé</span>
+      <span><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${CARTE_COL.partiel}"></span> Partiel</span>
+      <span><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${CARTE_COL.impaye}"></span> Impayé</span>
+      <span><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${CARTE_COL.avenir}"></span> À venir</span>
+    </div>
+    <div id="cartesList"></div>`;
+  renderCartesList();
+}
+function renderCartesList(){
+  const wrap = document.getElementById('cartesList'); if (!wrap) return;
+  const list = cartesStudents();
+  wrap.innerHTML = list.length ? list.map(s=>{
+    const pm = nPaidByMonth(s.id);
+    const strip = Array.from({length:12},(_,i)=>{
+      const ym = ymOf(CARTE.year, i+1); const st = carteMonthState(s, ym, pm);
+      return `<div title="${esc(monthLabel(i+1))}" style="flex:1;min-width:0;text-align:center;font-size:9.5px;font-weight:800;padding:4px 0;border-radius:5px;color:${st.st==='avenir'||st.st==='avant'?'#475569':'#fff'};background:${CARTE_COL[st.st]}">${esc(monthLabel(i+1).slice(0,3))}</div>`;
+    }).join('');
+    return `<div class="card" style="margin-bottom:10px;padding:12px 13px">
+      <div style="display:flex;gap:10px;align-items:flex-start">
+        <input type="checkbox" style="width:20px;height:20px;margin-top:2px;flex-shrink:0" ${CARTE.sel[s.id]?'checked':''} onchange="CARTE.sel['${s.id}']=this.checked;carteUpdCount()">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+            <div style="min-width:0"><b>${esc(s.first_name+' '+s.last_name)}</b>
+              <div style="font-size:11.5px;color:var(--muted)">${esc(s.matricule||'')} · ${s.category==='internat'?'Internat':'Externat'} · ${fmtGNF(s.monthly_fee)}/mois${paymentStatusOf(s)!=='payant'?' · Gracié':''}</div></div>
+          </div>
+          <div style="display:flex;gap:3px;margin-top:8px">${strip}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:9px">
+            <button class="fb fb-green fb-sm" onclick="openCarteEleve('${s.id}')">💳 Ouvrir la carte</button>
+            <button class="fb fb-ghost fb-sm" onclick="printCartes(['${s.id}'])">🖨️ Imprimer</button>
+          </div>
+        </div>
+      </div></div>`;
+  }).join('') : `<div class="empty-state"><div class="em">💳</div>Aucun élève ne correspond.</div>`;
+}
+function carteUpdCount(){ const el = document.getElementById('carteSelCount'); if (el) el.textContent = Object.keys(CARTE.sel).filter(k=>CARTE.sel[k]).length; }
+function carteSelectAll(on){ cartesStudents().forEach(s=>{ CARTE.sel[s.id] = on; }); if (!on) CARTE.sel = {}; renderCartesList(); carteUpdCount(); }
+function printCartesSelection(){
+  const ids = Object.keys(CARTE.sel).filter(k=>CARTE.sel[k] && DB.students.some(s=>s.id===k));
+  if (!ids.length){ toast('Cochez au moins un élève (ou « Tout sélectionner »).'); return; }
+  printCartes(ids);
+}
+
+/** Carte numérique : le comptable « coche » un mois → formulaire de paiement pré-rempli. */
+function openCarteEleve(studentId){
+  const s = DB.students.find(x=>x.id===studentId); if (!s) return;
+  const pm = nPaidByMonth(s.id);
+  const canPay = ['fondateur','admin','comptable'].includes((currentUser()||{}).role) && paymentStatusOf(s)==='payant';
+  const tiles = Array.from({length:12},(_,i)=>{
+    const ym = ymOf(CARTE.year, i+1); const st = carteMonthState(s, ym, pm);
+    const lbl = { paye:'✔ Payé', partiel:'◐ Partiel', impaye:'✖ Impayé', avenir:'À venir', avant:'—' }[st.st];
+    const click = canPay && st.st!=='paye' && st.st!=='avant';
+    return `<div ${click?`onclick="closeModal();openPaymentForm('${s.id}','${ym}',${st.balance||Number(s.monthly_fee)||0})"`:''}
+      style="border:2px solid ${CARTE_COL[st.st]};border-radius:10px;padding:8px 6px;text-align:center;${click?'cursor:pointer;':''}background:${st.st==='paye'?'rgba(22,163,74,.1)':st.st==='impaye'?'rgba(220,38,38,.06)':'var(--panel)'}">
+      <div style="font-weight:800;font-size:12.5px">${esc(monthLabel(i+1))}</div>
+      <div style="font-size:11px;font-weight:700;color:${CARTE_COL[st.st]==='#cbd5e1'||CARTE_COL[st.st]==='#e5e7eb'?'#64748b':CARTE_COL[st.st]};margin-top:2px">${lbl}</div>
+      <div style="font-size:10.5px;color:var(--muted);margin-top:2px">${st.paid?fmtGNF(st.paid):(click?'☐ Cocher':'')}</div>
+    </div>`;
+  }).join('');
+  openModal(`
+    <h3 style="margin-bottom:4px">💳 Carte de paiement ${CARTE.year}</h3>
+    <p style="color:var(--muted);font-size:12.5px;margin-bottom:12px">${esc(s.first_name+' '+s.last_name)} · ${esc(s.matricule||'')} · ${fmtGNF(s.monthly_fee)}/mois</p>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px">${tiles}</div>
+    ${canPay?`<p style="font-size:11.5px;color:var(--muted);margin-top:10px">Touchez un mois non payé pour l'encaisser : le formulaire s'ouvre avec l'élève, le mois et le montant déjà remplis.</p>`:''}
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="fb fb-gold" style="flex:1" onclick="printCartes(['${s.id}'])">🖨️ Imprimer (2 exemplaires)</button>
+      <button class="fb fb-ghost" onclick="closeModal()">Fermer</button>
+    </div>`);
+}
+
+/** Impression : une page A4 paysage par élève, avec 2 cartes identiques côte à côte. */
+function printCartes(ids){
+  ensureExt();
+  const studs = ids.map(id=>DB.students.find(s=>s.id===id)).filter(Boolean);
+  if (!studs.length) return;
+  const logo = DB.centerLogo || AGM_LOGO;
+  const P = nThemeColor(), A = nAccentColor();
+  const Y = CARTE.year;
+  const one = (s, who) => {
+    const pm = nPaidByMonth(s.id);
+    const fee = Number(s.monthly_fee)||0;
+    const rows = Array.from({length:12},(_,i)=>{
+      const ym = ymOf(Y, i+1); const st = carteMonthState(s, ym, pm);
+      const pre = CARTE.prefill && st.paid > 0;
+      const dt = pre ? nPayDateForMonth(s.id, ym) : '';
+      return `<tr>
+        <td class="mo">${esc(monthLabel(i+1))}</td>
+        <td class="amt">${pre?fmtGNF(st.paid):''}</td>
+        <td class="dt">${dt?nDateFr(dt):''}</td>
+        <td class="ck"><span class="box">${pre && st.st==='paye'?'✓':''}</span></td>
+        <td class="sig"></td></tr>`;
+    }).join('');
+    return `<div class="carte">
+      <div class="band ${who==='parent'?'band-p':''}">${who==='parent'?'EXEMPLAIRE PARENT':'EXEMPLAIRE COMPTABLE'}</div>
+      <div class="hd"><img src="${logo}" onerror="this.style.display='none'">
+        <div><div class="nm">${esc(DB.centerName||'AGM')}</div><div class="ad">${esc(DB.centerAddress||'')}${DB.centerPhone?' · '+esc(DB.centerPhone):''}</div></div>
+        <div class="yr">${Y}</div></div>
+      <div class="tt">CARTE DE PAIEMENT</div>
+      <div class="id">
+        ${s.photo?`<img class="ph" src="${s.photo}">`:''}
+        <div class="idg">
+          <div><span>Élève</span><b>${esc(s.first_name+' '+s.last_name)}</b></div>
+          <div><span>Matricule</span><b>${esc(s.matricule||'—')}</b></div>
+          <div><span>Catégorie</span><b>${s.category==='internat'?'Internat':'Externat'}</b></div>
+          <div><span>Mensualité</span><b>${fee?fmtGNF(fee):'—'}</b></div>
+          <div><span>Tuteur</span><b>${esc(s.guardian_name||'—')}</b></div>
+          <div><span>Téléphone</span><b>${esc(s.guardian_phone||'—')}</b></div>
+        </div>
+      </div>
+      <table><thead><tr><th>Mois</th><th>Montant versé</th><th>Date</th><th>✓</th><th>Signature du comptable</th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="ftr"><div>Total annuel attendu : <b>${fee?fmtGNF(fee*12):'—'}</b><br><br>Total versé : ………………………… GNF</div><div>Cachet du markaz</div></div>
+      <div class="nt">Carte à présenter à chaque paiement. Le comptable inscrit le montant, coche le mois et signe.</div>
+    </div>`;
+  };
+  const w = window.open('', '_blank', 'width=1200,height=850');
+  if (!w){ toast('Autorisez les fenêtres pop-up pour imprimer.'); return; }
+  const html = `<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>Cartes de paiement ${Y}</title>
+  <style>
+    @page{ size:A4 landscape; margin:6mm; }
+    *{box-sizing:border-box;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
+    body{margin:0;font-family:Arial,Helvetica,sans-serif;color:#111;background:#fff}
+    .page{width:285mm;height:197mm;display:flex;align-items:stretch;justify-content:space-between;page-break-after:always;break-after:page;margin:0 auto}
+    .page:last-child{page-break-after:auto;break-after:auto}
+    .cut{width:5mm;border-left:1.5px dashed #999;position:relative;margin-left:2.5mm}
+    .cut:before{content:'✂';position:absolute;top:-1mm;left:-2.6mm;font-size:12px;color:#777;background:#fff}
+    .carte{width:137mm;border:2px solid ${P};border-radius:4mm;padding:3mm 4mm;display:flex;flex-direction:column;position:relative;overflow:hidden}
+    .band{position:absolute;top:0;right:0;background:${P};color:#fff;font-size:7.5pt;font-weight:800;letter-spacing:.08em;padding:1.2mm 4mm;border-bottom-left-radius:3mm}
+    .band-p{background:${A};color:#1a1004}
+    .hd{display:flex;align-items:center;gap:3mm;border-bottom:2px solid ${P};padding-bottom:2mm;margin-top:3mm}
+    .hd img{width:13mm;height:13mm;object-fit:contain}
+    .hd .nm{font-weight:800;font-size:11pt;color:${P}}
+    .hd .ad{font-size:7pt;color:#555}
+    .hd .yr{margin-left:auto;font-size:16pt;font-weight:800;color:${A}}
+    .tt{text-align:center;font-weight:800;font-size:10.5pt;letter-spacing:.12em;margin:2mm 0 1.5mm}
+    .id{display:flex;gap:3mm;align-items:flex-start;margin-bottom:2mm}
+    .ph{width:16mm;height:16mm;object-fit:cover;border-radius:2mm;border:1px solid #ccc}
+    .idg{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:.8mm 3mm;font-size:7.8pt}
+    .idg div{display:flex;flex-direction:column;border-bottom:1px dotted #bbb;padding-bottom:.4mm}
+    .idg span{font-size:6.3pt;color:#666;text-transform:uppercase;letter-spacing:.04em}
+    .idg b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    table{width:100%;border-collapse:collapse;font-size:8pt}
+    th{background:${P};color:#fff;font-size:6.8pt;text-transform:uppercase;padding:1.3mm 1mm;text-align:center;border:1px solid ${P}}
+    td{border:1px solid #9aa;height:9.6mm;padding:0 1.5mm;vertical-align:middle}
+    tr:nth-child(even) td{background:#f4f8f5}
+    .mo{font-weight:800;width:22mm}
+    .amt{width:28mm;text-align:right;font-weight:700}
+    .dt{width:19mm;text-align:center;font-size:7pt}
+    .ck{width:9mm;text-align:center}
+    .box{display:inline-block;width:4.2mm;height:4.2mm;border:1.4px solid #333;border-radius:.8mm;line-height:3.6mm;font-size:9pt;font-weight:800;color:${P}}
+    .ftr{display:flex;justify-content:space-between;font-size:7.8pt;margin-top:2mm}
+    .ftr div:last-child{width:32mm;height:10mm;border:1px dashed #999;border-radius:2mm;text-align:center;font-size:6.5pt;color:#888;padding-top:.8mm}
+    .nt{font-size:6.5pt;color:#666;margin-top:1mm}
+    .noprint{text-align:center;padding:10px}
+    .noprint button{padding:9px 16px;border:0;border-radius:7px;font-weight:700;background:${P};color:#fff;cursor:pointer}
+    @media print{.noprint{display:none!important}}
+  </style></head><body>
+  <div class="noprint"><button onclick="window.print()">🖨️ Imprimer — A4 paysage (${studs.length} page${studs.length>1?'s':''})</button>
+    <div style="font-size:12px;color:#555;margin-top:6px">Chaque page contient 2 cartes identiques : découpez suivant la ligne ✂ — une pour le comptable, une pour le parent.</div></div>
+  ${studs.map(s=>`<div class="page">${one(s,'comptable')}<div class="cut"></div>${one(s,'parent')}</div>`).join('')}
+  </body></html>`;
+  w.document.write(html); w.document.close();
+}
+
+/* ---- Libellés traduits des nouveaux onglets ---- */
+try {
+  if (typeof TR === 'object' && TR){
+    TR['Rappels WhatsApp'] = TR['Rappels WhatsApp'] || { en:'WhatsApp reminders', ar:'تذكيرات واتساب' };
+    TR['Cartes de paiement'] = TR['Cartes de paiement'] || { en:'Payment cards', ar:'بطاقات الدفع' };
+  }
+} catch(e){}
+
+/* =====================================================================
+   ONGLET « FICHE DE RENSEIGNEMENT » — accès direct à la fiche configurée
+   (lecture seule des élèves ; rien n'est écrit dans la base ici)
+   ===================================================================== */
+function ficheIsConfigured(){ const c = DB.ficheConfig; return !!(c && (c.updatedAt || (c.internat && (c.internat.mensualite || c.internat.inscription)) || (c.externat && (c.externat.mensualite || c.externat.inscription)))); }
+function renderFichePage(){
+  ensureExt();
+  const can = isAdminOrAbove();
+  const c = ficheCfg();
+  const ok = ficheIsConfigured();
+  document.getElementById('pageContent').innerHTML = `
+    ${pageHead('Fiche de renseignement', ok ? ("Fiche d'information du markaz à remettre aux parents" + (c.anneeScolaire ? ' — année ' + esc(c.anneeScolaire) : '')) : 'La fiche n’est pas encore configurée',
+      (can?`<button class="fb fb-ghost" onclick="openFicheConfig()">⚙️ Configurer</button> `:'') +
+      `<button class="fb fb-gold" onclick="printFicheRenseignement(null)">🖨️ Imprimer la fiche</button>`)}
+    ${!ok?`<div class="card" style="margin-bottom:14px;border-left:4px solid #f59e0b">
+      <b>⚠️ Fiche non configurée</b>
+      <div style="font-size:12.5px;color:var(--muted);margin:6px 0 10px">Renseignez les frais d'inscription et mensualités, les horaires, les exigences, les pièces à fournir et les contacts des responsables.</div>
+      ${can?`<button class="fb fb-gold fb-sm" onclick="openFicheConfig()">⚙️ Configurer maintenant</button>`:'<span style="font-size:12px;color:var(--muted)">Demandez au fondateur de la configurer.</span>'}
+    </div>`:''}
+    <div class="card" style="margin-bottom:14px">
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px">Cette fiche présente le markaz aux personnes qui souhaitent y inscrire leur enfant : adresse, contacts des responsables, frais d'inscription, mensualités et exigences. Elle tient sur une seule page A4.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="fb fb-gold" style="flex:1;min-width:200px" onclick="printFicheRenseignement(null)">🖨️ Imprimer / Enregistrer en PDF</button>
+        ${can?`<button class="fb fb-ghost" style="flex:1;min-width:200px" onclick="openFicheConfig()">⚙️ Modifier les informations</button>`:''}
+      </div>
+    </div>
+    <div class="card" style="padding:12px">
+      <b style="display:block;margin-bottom:10px">👁️ Aperçu de la fiche</b>
+      <div id="fichePrevWrap" style="position:relative;width:100%;overflow:hidden;border-radius:10px;background:#e9eeeb"></div>
+    </div>`;
+  ficheShowPreview();
+}
+/** Aperçu intégré : la fiche A4 réduite à la largeur de l'écran (téléphone compris). */
+function ficheShowPreview(){
+  const wrap = document.getElementById('fichePrevWrap'); if (!wrap) return;
+  const W = 794, H = 1123 + 80;
+  const k = Math.min(1, (wrap.clientWidth || 360) / W);
+  wrap.style.height = Math.round(H * k) + 'px';
+  wrap.innerHTML = `<iframe id="fichePrevFrame" title="Aperçu de la fiche" style="position:absolute;top:0;left:0;width:${W}px;height:${H}px;border:0;transform:scale(${k});transform-origin:top left;background:#e9eeeb"></iframe>`;
+  try { document.getElementById('fichePrevFrame').srcdoc = ficheHtml(null); } catch(e){}
+}
+try { if (typeof TR === 'object' && TR && !TR['Fiche de renseignement']) TR['Fiche de renseignement'] = { en:'Registration form', ar:'استمارة التسجيل' }; } catch(e){}
+
 </script>
 </body>
 </html>
