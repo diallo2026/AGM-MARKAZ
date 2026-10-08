@@ -1548,7 +1548,7 @@ function pageHead(title, sub, actionsHtml){
    après un déploiement, c'est que l'ancienne version est encore en
    cache sur l'appareil.
    ===================================================================== */
-const AGM_VERSION = '2026.10.08-1';
+const AGM_VERSION = '2026.10.08-2';
 
 /** Supprime tout le cache local de l'appli et recharge la dernière version. */
 async function forcerMiseAJour(){
@@ -9107,6 +9107,7 @@ function waCfg(){
     hour: c.hour || '09:00',
     remindUpcoming: c.remindUpcoming !== false,
     remindDebt: c.remindDebt !== false,
+    promptAssisted: c.promptAssisted !== false,
     confirmPayment: c.confirmPayment !== false,
     confirmDelay: nNum(c.confirmDelay, 5),
     confirmTrigger: c.confirmTrigger === 'recorded' ? 'recorded' : 'approved',
@@ -9133,6 +9134,9 @@ function waDeviceId(){
 function waNormPhone(raw){
   let d = String(raw||'').trim();
   if (!d) return '';
+  // Plusieurs numéros saisis (« 623… / 664… », « 623… ou 664… ») : on garde le premier valide.
+  const parts = d.split(/[\/,;|]|\s(?:ou|et|or)\s/i).map(x=>x.trim()).filter(x=>x.replace(/\D/g,'').length >= 8);
+  if (parts.length > 1) d = parts[0];
   d = d.replace(/[^\d+]/g,'');
   if (d.startsWith('+')) d = d.slice(1);
   else if (d.startsWith('00')) d = d.slice(2);
@@ -9374,11 +9378,22 @@ async function waDeliver(key, phone, text, meta){
   if (prev && (prev.s === 'ok' || prev.s === 'nowa')) return prev.s;
   const has = await waHasWhatsApp(phone);
   if (has === false){ waLogSet(key, Object.assign({}, meta, { p: phone, s: 'nowa', e: 'Numéro sans compte WhatsApp' })); return 'nowa'; }
-  try {
-    await waApiSend(phone, text);
-    waLogSet(key, Object.assign({}, meta, { p: phone, s: 'ok', e: '' }));
-    return 'ok';
-  } catch(e){
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++){
+    try {
+      await waApiSend(phone, text);
+      waLogSet(key, Object.assign({}, meta, { p: phone, s: 'ok', e: '' }));
+      return 'ok';
+    } catch(e){
+      lastErr = e;
+      const msg = String(e && e.message || e);
+      // Erreurs définitives (identifiants, adresse, forfait) : inutile de réessayer.
+      if (/Identifiants|introuvable|forfait|manquant|refusé|non connecté/i.test(msg)) break;
+      if (attempt < 2) await new Promise(r=>setTimeout(r, attempt ? 8000 : 3000));   // réseau / surcharge : nouvel essai
+    }
+  }
+  {
+    const e = lastErr;
     const tries = (prev && prev.tries || 0) + 1;
     waLogSet(key, Object.assign({}, meta, { p: phone, s: 'fail', e: String(e && e.message || e).slice(0,160), tries }));
     return 'fail';
@@ -9410,6 +9425,7 @@ async function waRunReminders(manual){
       logAction('Rappels WhatsApp', `${ok} envoyé(s), ${nowa} sans WhatsApp, ${ko} échec(s)`);
       toast(`📲 Rappels WhatsApp : ${ok} envoyé(s)` + (nowa?`, ${nowa} sans WhatsApp`:'') + (ko?`, ${ko} échec(s)`:''), 5000);
     }
+    if (ko && manual) setTimeout(()=>waPromptPending(new Date(), true, true), 600);
   } finally {
     WA_RUN.busy = false; WA_RUN.progress = '';
     if (currentPage === 'whatsapp') renderWhatsApp();
@@ -9493,14 +9509,19 @@ async function waTick(){
     if (!SESSION || !DB || typeof currentUser !== 'function') return;
     const u = currentUser(); if (!u || !['fondateur','admin','comptable'].includes(u.role)) return;
     const c = waCfg();
-    if (!waAuto()) return;
     if (c.senderDevice && c.senderDevice !== waDeviceId()) return;   // un seul appareil d'envoi désigné
-    if (WA_RUN.busy) return;
-    await waScanPaymentConfirmations();
+    if (WA_RUN.busy || WA_SEQ) return;
     const now = new Date();
-    if (!c.days.includes(now.getDate())) return;
     const hm = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0');
-    if (hm < c.hour) return;
+    const isDay = c.days.includes(now.getDate()) && hm >= c.hour;
+    if (!waAuto()){
+      // Mode assisté (sans passerelle) : à l'heure des rappels, l'appli PROPOSE d'elle-même
+      // l'envoi des rappels du jour (débiteurs en premier), comme pour les reçus de paiement.
+      if (isDay && c.promptAssisted) waPromptPending(now, false);
+      return;
+    }
+    await waScanPaymentConfirmations();
+    if (!isDay) return;
     // Petit délai aléatoire : si plusieurs appareils sont ouverts, le premier envoie
     // et les autres voient le journal synchronisé avant de commencer.
     await new Promise(r=>setTimeout(r, Math.random()*15000));
@@ -9508,6 +9529,7 @@ async function waTick(){
     const q = waBuildReminderQueue(now);
     const pending = q.items.some(it=>{ const l = waLogGet(it.key); return !(l && (l.s==='ok' || l.s==='nowa' || (l.s==='fail' && (l.tries||0) >= 3))); });
     if (pending) await waRunReminders(false);
+    waPromptPending(now, true);   // ce qui n'a pas pu partir par la passerelle est proposé à l'envoi manuel
   } catch(e){ console.warn('AGM WhatsApp: tick', e && e.message); }
 }
 if (!window._agmWaTimer){
@@ -9597,6 +9619,7 @@ function renderWhatsApp(){
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;align-items:center">
           ${l?stBadge(l.s)+` <span style="font-size:11px;color:var(--muted)">${new Date(l.at).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}</span>`:'<span class="badge badge-slate">Pas encore envoyé aujourd’hui</span>'}
+          ${l&&l.s==='fail'&&l.e?`<div style="width:100%;font-size:11.5px;color:#b91c1c">Raison : ${esc(l.e)}</div>`:''}
           <span style="flex:1"></span>
           <button class="fb fb-ghost fb-sm" onclick="waPreview(${i})">👁️ Message</button>
           <button class="fb fb-green fb-sm" onclick="waOpenManual(${i})">📲 Envoyer</button>
@@ -9657,7 +9680,7 @@ async function waOpenManual(i){
   if (currentPage==='whatsapp') renderWhatsApp();
 }
 function waManualRun(){
-  if (!waAuto()){ toast('Mode assisté : utilisez le bouton 📲 de chaque parent, ou configurez une passerelle.', 4500); return; }
+  if (!waAuto()){ waStartGuided(); return; }
   if (!confirm('Envoyer maintenant les rappels à tous les parents de la liste (ceux qui l’ont déjà reçu aujourd’hui sont ignorés) ?')) return;
   waRunReminders(true);
   setTimeout(()=>{ if (currentPage==='whatsapp') renderWhatsApp(); }, 300);
@@ -9676,7 +9699,7 @@ function waCollect(){
   const ck = id => { const el = document.getElementById(id); return el ? !!el.checked : undefined; };
   ['provider','apiUrl','idInstance','apiToken','ultraInstance','ultraToken','customUrl','customAuth','countryCode','hour','confirmTrigger','intro','footer']
     .forEach(k=>{ const x = v('wa_'+k); if (x !== undefined) f[k] = String(x).trim(); });
-  ['enabled','remindUpcoming','remindDebt','confirmPayment','checkNumbers'].forEach(k=>{ const x = ck('wa_'+k); if (x !== undefined) f[k] = x; });
+  ['enabled','remindUpcoming','remindDebt','confirmPayment','checkNumbers','promptAssisted'].forEach(k=>{ const x = ck('wa_'+k); if (x !== undefined) f[k] = x; });
   const dl = v('wa_confirmDelay'); if (dl !== undefined) f.confirmDelay = Math.max(0, nNum(dl,5));
   const gp = v('wa_gap'); if (gp !== undefined) f.gap = Math.max(2, nNum(gp,4));
   const days = Array.from(document.querySelectorAll('.waDayChk')); if (days.length) f.days = days.filter(x=>x.checked).map(x=>Number(x.value));
@@ -9732,7 +9755,8 @@ function renderWaConfigModal(){
       </div>
       <div class="fg"><label class="fl">À partir de l'heure</label><input class="fi" type="time" id="wa_hour" value="${esc(f.hour)}"></div>
       <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-bottom:6px"><input type="checkbox" id="wa_remindUpcoming" ${f.remindUpcoming?'checked':''}> Rappeler la mensualité aux parents à jour (le 28 : mois suivant ; du 1 au 10 : mois en cours)</label>
-      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input type="checkbox" id="wa_remindDebt" ${f.remindDebt?'checked':''}> Relancer les parents ayant des dettes, avec le détail des mois et le montant</label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-bottom:6px"><input type="checkbox" id="wa_remindDebt" ${f.remindDebt?'checked':''}> Relancer les parents ayant des dettes, avec le détail des mois et le montant</label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input type="checkbox" id="wa_promptAssisted" ${f.promptAssisted?'checked':''}> Sans passerelle : proposer automatiquement l'envoi des rappels du jour à l'ouverture de l'appli</label>
     </div>
 
     <div style="${box}">
@@ -10434,6 +10458,83 @@ function savePayMode(){
   logAction('Mode de paiement', (f.mode==='fin'?'Fin du mois':'Début du mois') + ' — limite le ' + f.limit + (f.auto?' (rappels ajustés)':''));
   toast('✅ Mode de paiement enregistré : ' + (f.mode==='fin'?'fin du mois':'début du mois') + '.');
   if (currentPage==='settings') renderSettings();
+}
+
+
+/* =====================================================================
+   ENVOI GUIDÉ DES RAPPELS (mode assisté, ou secours si la passerelle échoue)
+   Un navigateur n'autorise l'ouverture de WhatsApp que sur un geste de
+   l'utilisateur : l'appli prépare chaque message et l'opérateur n'a qu'à
+   toucher « Envoyer » pour chaque parent, à la suite (débiteurs en premier).
+   ===================================================================== */
+let WA_SEQ = null;
+function waPendingItems(ref, failedOnly){
+  const q = waBuildReminderQueue(ref || new Date());
+  return q.items.filter(it=>{
+    const l = waLogGet(it.key);
+    if (failedOnly) return l && l.s === 'fail';
+    return !(l && (l.s==='ok' || l.s==='nowa' || l.s==='manual'));
+  }).sort((a,b)=>((b.type==='dette') - (a.type==='dette')) || (b.total - a.total));
+}
+function waStartGuided(failedOnly){
+  const items = waPendingItems(new Date(), failedOnly);
+  if (!items.length){ toast('✅ Tous les rappels du jour sont déjà envoyés.'); return; }
+  WA_SEQ = { items, i: 0, sent: 0 };
+  const b = document.getElementById('waRemindBanner'); if (b) b.remove();
+  renderWaSeq();
+}
+function renderWaSeq(){
+  if (!WA_SEQ) return;
+  const it = WA_SEQ.items[WA_SEQ.i];
+  if (!it){ const n = WA_SEQ.sent; WA_SEQ = null; closeModal(); toast('📲 Rappels terminés : ' + n + ' message(s) envoyé(s).', 4000); if (currentPage==='whatsapp') renderWhatsApp(); return; }
+  const n = WA_SEQ.items.length, k = WA_SEQ.i + 1;
+  openModal(`
+    <h3 style="margin-bottom:4px">📲 Rappels du jour — ${k} / ${n}</h3>
+    <div style="height:6px;background:var(--panel);border-radius:6px;overflow:hidden;margin-bottom:12px"><div style="height:100%;width:${Math.round((k-1)/n*100)}%;background:var(--brand-light)"></div></div>
+    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      <div><b>${esc(it.parent||'Parent')}</b><div style="font-size:12px;color:var(--muted)">+${esc(it.phone)} · ${it.lines.map(x=>esc(x.s.first_name+' '+x.s.last_name)).join(', ')}</div></div>
+      <div style="text-align:right">${it.type==='dette'?'<span class="badge badge-red">Arriérés</span>':'<span class="badge badge-amber">Mensualité</span>'}<div style="font-weight:800;margin-top:3px">${fmtGNF(it.total)}</div></div>
+    </div>
+    <pre style="white-space:pre-wrap;font-family:inherit;font-size:12px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;max-height:34vh;overflow:auto">${esc(it.text)}</pre>
+    <button class="fb fb-green" style="width:100%;margin-top:12px;padding:15px;font-size:15px" onclick="waSeqSend()">💬 Envoyer sur WhatsApp</button>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="fb fb-ghost" style="flex:1" onclick="waSeqSkip()">⏭ Passer</button>
+      <button class="fb fb-ghost" style="flex:1" onclick="waSeqStop()">⏹ Arrêter</button>
+    </div>
+    <p style="font-size:11.5px;color:var(--muted);margin-top:10px">WhatsApp s'ouvre avec le message déjà écrit : appuyez sur ➤ puis revenez ici, le parent suivant s'affiche.</p>`);
+}
+function waSeqSend(){
+  if (!WA_SEQ) return;
+  const it = WA_SEQ.items[WA_SEQ.i]; if (!it) return;
+  window.open(waLink(it.phone, it.text), '_blank');
+  waLogSet(it.key, { t: it.type, p: it.phone, s: 'manual', e: '', n: it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', '), m: it.total });
+  WA_SEQ.sent++; WA_SEQ.i++;
+  setTimeout(renderWaSeq, 400);
+}
+function waSeqSkip(){ if (!WA_SEQ) return; WA_SEQ.i++; renderWaSeq(); }
+function waSeqStop(){ WA_SEQ = null; closeModal(); if (currentPage==='whatsapp') renderWhatsApp(); }
+
+/** Bandeau automatique : « X rappels du jour à envoyer » (débiteurs compris). */
+function waPromptPending(now, failedOnly, force){
+  try {
+    if (WA_SEQ || document.getElementById('waRemindBanner')) return;
+    const modal = document.getElementById('modalBg'); if (modal && modal.classList.contains('show') && !force) return;
+    const dk = 'agm_wa_prompt_' + waDayKey(now) + (failedOnly ? '_f' : '');
+    let seen = null; try { seen = sessionStorage.getItem(dk); } catch(e){}
+    if (seen && !force) return;
+    const items = waPendingItems(now, failedOnly);
+    if (!items.length) return;
+    const debt = items.filter(i=>i.type==='dette').length;
+    const tot = items.reduce((a,i)=>a+i.total,0);
+    const b = document.createElement('div'); b.id = 'waRemindBanner';
+    b.style.cssText = 'position:fixed;left:50%;bottom:70px;transform:translateX(-50%);z-index:9997;background:#fff;color:#14261b;border:2px solid '+(debt?'#dc2626':'#16a34a')+';border-radius:12px;padding:12px 14px;box-shadow:0 10px 28px rgba(0,0,0,.3);max-width:92vw;width:390px;font-size:13px';
+    b.innerHTML = `<b>🔔 ${failedOnly?'Rappels non partis par la passerelle':'Rappels de paiement du jour'}</b>
+      <div style="margin:4px 0 10px;color:#5f7268">${items.length} parent(s) à prévenir${debt?` dont <b style="color:#b91c1c">${debt} avec des dettes</b>`:''} — ${fmtGNF(tot)} au total.</div>
+      <div style="display:flex;gap:8px"><button class="fb fb-green fb-sm" style="flex:1" onclick="waStartGuided(${failedOnly?'true':'false'})">📲 Envoyer maintenant</button>
+      <button class="fb fb-ghost fb-sm" onclick="document.getElementById('waRemindBanner').remove()">Plus tard</button></div>`;
+    document.body.appendChild(b);
+    try { sessionStorage.setItem(dk, '1'); } catch(e){}
+  } catch(e){}
 }
 
 </script>
