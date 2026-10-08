@@ -1548,7 +1548,7 @@ function pageHead(title, sub, actionsHtml){
    après un déploiement, c'est que l'ancienne version est encore en
    cache sur l'appareil.
    ===================================================================== */
-const AGM_VERSION = '2026.10.07-4';
+const AGM_VERSION = '2026.10.08-1';
 
 /** Supprime tout le cache local de l'appli et recharge la dernière version. */
 async function forcerMiseAJour(){
@@ -8060,6 +8060,7 @@ function renderSettings(){
     </div>
 
     ${ficheSettingsCardHtml()}
+    ${payModeCardHtml()}
     ${waSettingsCardHtml()}
     ${calendarReviewHtml()}
     ${langBlockHtml()}
@@ -8894,8 +8895,9 @@ function ficheHtml(_unused, cfgOverride){
   if (d.hourouf) pieces.push(['Livret de Hourouf', 'pour les débutants']);
   if (d.fournitures) pieces.push(['Fournitures scolaires', d.fournituresDetail ? esc(d.fournituresDetail) : 'pour les élèves scolarisés']);
   d.autres.forEach(a=>pieces.push([esc(a), '']));
-  const totInt = (c.internat.inscription||0) + (c.internat.mensualite||0);
-  const totExt = (c.externat.inscription||0) + (c.externat.mensualite||0);
+  const pmDebut = payModeCfg().mode === 'debut';
+  const totInt = (c.internat.inscription||0) + (pmDebut ? (c.internat.mensualite||0) : 0);
+  const totExt = (c.externat.inscription||0) + (pmDebut ? (c.externat.mensualite||0) : 0);
   const pres = c.presentation || "Le markaz accueille les enfants pour l'apprentissage et la mémorisation du Saint Coran, dans un cadre sérieux, éducatif et bienveillant, en internat comme en externat.";
 
   return `<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">
@@ -8992,11 +8994,11 @@ function ficheHtml(_unused, cfgOverride){
         <div class="tf"><div class="th">🏠 Internat <small>Pension complète</small></div>
           <div class="tb"><div><div class="k">Frais d'inscription</div><div class="m">${money(c.internat.inscription)}</div></div>
           <div><div class="k">Mensualité</div><div class="m">${money(c.internat.mensualite)}</div></div>
-          <div class="ln"><span>À verser à l'inscription (inscription + 1er mois)</span><b>${totInt?fmtGNF(totInt):'—'}</b></div></div></div>
+          <div class="ln"><span>${pmDebut?"À verser à l'inscription (inscription + 1er mois)":"À verser à l'inscription"}</span><b>${totInt?fmtGNF(totInt):'—'}</b></div></div></div>
         <div class="tf ext"><div class="th">🚶 Externat <small>Cours de ${esc(c.externat.heureDebut)} à ${esc(c.externat.heureFin)}</small></div>
           <div class="tb"><div><div class="k">Frais d'inscription</div><div class="m">${money(c.externat.inscription)}</div></div>
           <div><div class="k">Mensualité</div><div class="m">${money(c.externat.mensualite)}</div></div>
-          <div class="ln"><span>À verser à l'inscription (inscription + 1er mois)</span><b>${totExt?fmtGNF(totExt):'—'}</b></div></div></div>
+          <div class="ln"><span>${pmDebut?"À verser à l'inscription (inscription + 1er mois)":"À verser à l'inscription"}</span><b>${totExt?fmtGNF(totExt):'—'}</b></div></div></div>
       </div>
     </div>
 
@@ -9020,8 +9022,8 @@ function ficheHtml(_unused, cfgOverride){
       <div class="st"><span class="n">4</span>Comment se passe l'inscription ?</div>
       <div class="steps">
         <div class="stp"><b>① Dépôt du dossier</b>Présentez-vous au markaz avec l'enfant et les pièces demandées.</div>
-        <div class="stp"><b>② Paiement</b>Réglez les frais d'inscription et le premier mois ; un reçu vous est remis.</div>
-        <div class="stp"><b>③ Mensualités</b>À payer au plus tard le <b style="display:inline;color:inherit">10</b> de chaque mois, sur présentation de votre carte de paiement.</div>
+        <div class="stp"><b>② Paiement</b>${pmDebut?"Réglez les frais d'inscription et le premier mois ; un reçu vous est remis.":"Réglez les frais d'inscription ; un reçu vous est remis."}</div>
+        <div class="stp"><b>③ Mensualités</b>${esc(payModeEcheanceText())}, sur présentation de votre carte de paiement.</div>
       </div>
     </div>
 
@@ -9101,7 +9103,7 @@ function waCfg(){
     ultraInstance: c.ultraInstance || '', ultraToken: c.ultraToken || '',
     customUrl: c.customUrl || '', customAuth: c.customAuth || '',
     countryCode: String(c.countryCode || '224').replace(/\D/g,''),
-    days: days.length ? days.sort((a,b)=>a-b) : WA_DEFAULT_DAYS.slice(),
+    days: days.length ? days.sort((a,b)=>a-b) : payModeDays(),
     hour: c.hour || '09:00',
     remindUpcoming: c.remindUpcoming !== false,
     remindDebt: c.remindDebt !== false,
@@ -9153,40 +9155,94 @@ function waLogSet(key, entry){
 }
 function waDayKey(d){ d = d || new Date(); return d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0'); }
 
-/* ---- Passerelles ---- */
+/* ---- Passerelles ----
+   CORRECTIF 404 : Green-API attribue à chaque instance SON adresse (apiUrl), du type
+   https://7103.api.greenapi.com (les 4 premiers chiffres de l'idInstance). Avec
+   l'adresse générique, ou une apiUrl mal collée (« /waInstance… », espace, sans
+   https), le serveur répond 404. L'appli nettoie désormais les identifiants, essaie
+   automatiquement les bonnes adresses et retient celle qui fonctionne. */
+function waClean(v){ return String(v||'').replace(/\s+/g,'').trim(); }
+function waGreenId(c){ return waClean(c.idInstance).replace(/\D/g,''); }
+function waGreenBases(c){
+  const id = waGreenId(c);
+  let u = waClean(c.apiUrl).replace(/\/waInstance.*$/i,'').replace(/\/+$/,'');
+  if (u && !/^https?:\/\//i.test(u)) u = 'https://' + u;
+  const p4 = id.slice(0,4);
+  let cached = null; try { cached = localStorage.getItem('agm_wa_gbase_' + id); } catch(e){}
+  const list = [];
+  [cached, u, p4 && ('https://' + p4 + '.api.greenapi.com'), p4 && ('https://' + p4 + '.api.green-api.com'),
+   'https://api.greenapi.com', 'https://api.green-api.com'].forEach(x=>{ if (x && !list.includes(x)) list.push(x); });
+  return list;
+}
+async function waGreenCall(c, method, body){
+  const id = waGreenId(c), tok = waClean(c.apiToken);
+  if (!id || !tok) throw new Error('Identifiants Green-API manquants (idInstance / apiTokenInstance)');
+  let lastErr = null;
+  for (const base of waGreenBases(c)){
+    let r;
+    try {
+      r = await fetch(base + '/waInstance' + id + '/' + method + '/' + encodeURIComponent(tok),
+        body === undefined ? { method:'GET' } : { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    } catch(e){ lastErr = new Error('Serveur injoignable : ' + base); continue; }
+    if (r.status === 404){ lastErr = new Error('Adresse apiUrl introuvable (404) — copiez l’apiUrl exacte affichée dans votre console Green-API'); continue; }
+    const txt = await r.text(); let j = {}; try { j = JSON.parse(txt); } catch(e){}
+    if (r.status === 401 || r.status === 403) throw new Error('Identifiants refusés : vérifiez idInstance et apiTokenInstance');
+    if (r.status === 466) throw new Error('Limite du forfait Green-API atteinte (le forfait gratuit n’autorise que quelques numéros) — passez au forfait Business');
+    if (!r.ok) throw new Error((j.message || txt || 'Erreur passerelle').toString().slice(0,140) + ' (HTTP ' + r.status + ')');
+    try { localStorage.setItem('agm_wa_gbase_' + id, base); } catch(e){}
+    return j;
+  }
+  throw lastErr || new Error('Passerelle Green-API injoignable');
+}
+function waUltraInstance(c){
+  let i = waClean(c.ultraInstance).replace(/^https?:\/\/api\.ultramsg\.com\//i,'').replace(/\/.*$/,'');
+  if (/^\d+$/.test(i)) i = 'instance' + i;          // « 12345 » → « instance12345 » (sinon 404)
+  return i;
+}
+async function waUltraCall(c, path, opts){
+  const inst = waUltraInstance(c), tok = waClean(c.ultraToken);
+  if (!inst || !tok) throw new Error('Identifiants UltraMsg manquants');
+  let r;
+  try { r = await fetch('https://api.ultramsg.com/' + encodeURIComponent(inst) + path, opts || {}); }
+  catch(e){ throw new Error('Serveur UltraMsg injoignable'); }
+  if (r.status === 404) throw new Error('Instance UltraMsg introuvable (404) : saisissez l’ID sous la forme instance12345');
+  const j = await r.json().catch(()=>({}));
+  if (!r.ok || j.error) throw new Error((j.error && (j.error.message || JSON.stringify(j.error))) || ('Erreur UltraMsg HTTP ' + r.status));
+  return j;
+}
 async function waApiSend(phone, text){
   const c = waCfg();
   if (c.provider === 'greenapi'){
-    if (!c.idInstance || !c.apiToken) throw new Error('Identifiants Green-API manquants');
-    const base = (c.apiUrl || 'https://api.green-api.com').replace(/\/+$/,'');
-    const r = await fetch(base + '/waInstance' + encodeURIComponent(c.idInstance) + '/sendMessage/' + encodeURIComponent(c.apiToken), {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ chatId: phone + '@c.us', message: text })
-    });
-    const j = await r.json().catch(()=>({}));
-    if (!r.ok || !j.idMessage) throw new Error(j.message || ('Erreur passerelle HTTP ' + r.status));
+    const j = await waGreenCall(c, 'sendMessage', { chatId: phone + '@c.us', message: text });
+    if (!j.idMessage) throw new Error(j.message || 'Message refusé par Green-API');
     return j.idMessage;
   }
   if (c.provider === 'ultramsg'){
-    if (!c.ultraInstance || !c.ultraToken) throw new Error('Identifiants UltraMsg manquants');
-    const body = new URLSearchParams({ token: c.ultraToken, to: '+' + phone, body: text });
-    const r = await fetch('https://api.ultramsg.com/' + encodeURIComponent(c.ultraInstance) + '/messages/chat', {
-      method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body
-    });
-    const j = await r.json().catch(()=>({}));
-    if (!r.ok || j.error || !(j.sent==='true' || j.sent===true || j.id)) throw new Error((j.error && (j.error.message||JSON.stringify(j.error))) || ('Erreur passerelle HTTP ' + r.status));
+    const j = await waUltraCall(c, '/messages/chat', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body: new URLSearchParams({ token: waClean(c.ultraToken), to: '+' + phone, body: text }) });
+    if (!(j.sent === 'true' || j.sent === true || j.id)) throw new Error(j.message || 'Message refusé par UltraMsg');
     return j.id || 'ok';
   }
   if (c.provider === 'custom'){
-    if (!c.customUrl) throw new Error('Adresse de la passerelle manquante');
+    const url = String(c.customUrl||'').trim();
+    if (!url) throw new Error('Adresse de la passerelle manquante');
     const h = {'Content-Type':'application/json'};
     if (c.customAuth) h['Authorization'] = c.customAuth;
-    const r = await fetch(c.customUrl, { method:'POST', headers:h,
-      body: JSON.stringify({ phone, message: text, markaz: DB.centerName || 'AGM' }) });
+    let r;
+    try { r = await fetch(url, { method:'POST', headers:h, body: JSON.stringify({ phone, message: text, markaz: DB.centerName || 'AGM' }) }); }
+    catch(e){ throw new Error('Passerelle injoignable : ' + url); }
+    if (r.status === 404) throw new Error('Adresse de la passerelle introuvable (404) : ' + url);
     if (!r.ok) throw new Error('Erreur passerelle HTTP ' + r.status);
     return 'ok';
   }
   throw new Error('Aucune passerelle configurée');
+}
+/** État de la connexion WhatsApp de la passerelle (pour le test). */
+async function waGatewayState(){
+  const c = waCfg();
+  if (c.provider === 'greenapi'){ const j = await waGreenCall(c, 'getStateInstance'); return j.stateInstance || 'inconnu'; }
+  if (c.provider === 'ultramsg'){ const j = await waUltraCall(c, '/instance/status?token=' + encodeURIComponent(waClean(c.ultraToken))); return (j.status && j.status.accountStatus && j.status.accountStatus.status) || 'inconnu'; }
+  return 'inconnu';
 }
 
 /** Le numéro a-t-il un compte WhatsApp ? true / false / null (inconnu). Résultat
@@ -9201,27 +9257,43 @@ async function waHasWhatsApp(phone){
   let v = null;
   try {
     if (c.provider === 'greenapi'){
-      const base = (c.apiUrl || 'https://api.green-api.com').replace(/\/+$/,'');
-      const r = await fetch(base + '/waInstance' + encodeURIComponent(c.idInstance) + '/checkWhatsapp/' + encodeURIComponent(c.apiToken), {
-        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ phoneNumber: Number(phone) }) });
-      const j = await r.json().catch(()=>({}));
-      if (r.ok && typeof j.existsWhatsapp === 'boolean') v = j.existsWhatsapp;
+      const j = await waGreenCall(c, 'checkWhatsapp', { phoneNumber: Number(phone) });
+      if (typeof j.existsWhatsapp === 'boolean') v = j.existsWhatsapp;
     } else if (c.provider === 'ultramsg'){
-      const r = await fetch('https://api.ultramsg.com/' + encodeURIComponent(c.ultraInstance) + '/contacts/check?token=' + encodeURIComponent(c.ultraToken) + '&chatId=' + phone + '@c.us');
-      const j = await r.json().catch(()=>({}));
-      if (r.ok && j.status) v = (j.status === 'valid');
+      const j = await waUltraCall(c, '/contacts/check?token=' + encodeURIComponent(waClean(c.ultraToken)) + '&chatId=' + phone + '@c.us');
+      if (j.status) v = (j.status === 'valid');
     }
-  } catch(e){ v = null; }
+  } catch(e){ v = null; }   // la vérification ne bloque jamais l'envoi
   if (v !== null){ cache[phone] = { v, t: Date.now() }; try { localStorage.setItem('agm_wa_numcache', JSON.stringify(cache)); } catch(e){} }
   return v;
+}
+/** Lien WhatsApp direct (toujours disponible, même si la passerelle est en panne). */
+function waLink(phone, text){ return 'https://wa.me/' + String(phone||'').replace(/\D/g,'') + '?text=' + encodeURIComponent(text||''); }
+/** Fenêtre de secours : en cas d'échec de la passerelle, le message part à la main en 1 clic. */
+function waFallbackModal(phone, text, err, key, meta){
+  window._waFb = { phone, text, key, meta };
+  openModal(`<h3>⚠️ Envoi automatique impossible</h3>
+    <p style="font-size:12.5px;color:#b91c1c;margin-bottom:10px">${esc(err||'Erreur de la passerelle')}</p>
+    <p style="font-size:12.5px;color:var(--muted);margin-bottom:12px">Vous pouvez envoyer ce message tout de suite par WhatsApp (il est déjà rédigé), puis corriger la passerelle dans ⚙️ Configurer → 🧪 Tester.</p>
+    <div style="display:flex;gap:8px">
+      <button class="fb fb-green" style="flex:1" onclick="waFallbackGo()">💬 Ouvrir WhatsApp</button>
+      <button class="fb fb-ghost" onclick="closeModal()">Fermer</button></div>`);
+}
+function waFallbackGo(){
+  const f = window._waFb || {}; if (!f.phone) return;
+  window.open(waLink(f.phone, f.text), '_blank');
+  if (f.key) waLogSet(f.key, Object.assign({}, f.meta||{}, { p: f.phone, s:'manual', e:'' }));
+  closeModal();
+  if (currentPage==='whatsapp') renderWhatsApp();
 }
 
 /* ---- Rédaction des messages ---- */
 function waReminderTarget(ref){
   ref = ref || new Date();
   let y = ref.getFullYear(), m = ref.getMonth()+1;
-  // Fin de mois (à partir du 20) : on annonce la mensualité du mois SUIVANT.
-  if (ref.getDate() >= 20){ m++; if (m > 12){ m = 1; y++; } }
+  // Paiement en DÉBUT de mois : à partir du 20 on annonce la mensualité du mois SUIVANT.
+  // Paiement en FIN de mois : la mensualité visée est celle du mois en cours.
+  if (payModeCfg().mode === 'debut' && ref.getDate() >= 20){ m++; if (m > 12){ m = 1; y++; } }
   return ymOf(y, m);
 }
 
@@ -9237,7 +9309,9 @@ function waBuildReminderQueue(ref){
     if (s.enrollment_date && String(s.enrollment_date).slice(0,7) > target) return;
     const sit = nDebtSituation(s, target);
     const paidT = nPaidByMonth(s.id)[target] || 0;
-    const dueT = Math.max(0, fee - paidT);
+    // Fin de mois : du 1er au 19, le mois en cours n'est pas encore exigible (seuls les retards sont relancés).
+    const dueNow = payModeCfg().mode === 'debut' || ref.getDate() >= 20;
+    const dueT = dueNow ? Math.max(0, fee - paidT) : 0;
     const hasDebt = sit.arrearsAmount > 0;
     if (hasDebt && !c.remindDebt && !c.remindUpcoming) return;
     if (!hasDebt && (!c.remindUpcoming || dueT <= 0)) return;
@@ -9270,7 +9344,7 @@ function waReminderText(g, total, debt){
     if (l.arrearsAmount > 0 && l.dueT > 0) t += `   ➜ Sous-total : ${fmtGNF(l.arrearsAmount + l.dueT)}\n`;
   });
   t += `\n💰 *Montant total à régler : ${fmtGNF(total)}*\n`;
-  if (!debt) t += `La mensualité est attendue au plus tard le 10. Merci pour votre régularité 🙏\n`;
+  if (!debt) t += `${payModeEcheanceText()}. Merci pour votre régularité 🙏\n`;
   t += `\n${c.footer}`;
   return t;
 }
@@ -9371,23 +9445,23 @@ async function waSendPaymentConfirmation(paymentId, force){
   const r = await waDeliver(key, phone, text, { t:'paiement', n: (s.first_name||'')+' '+(s.last_name||''), m: p.amount, ids: s.id||'' });
   if (r === 'ok') toast('📲 Confirmation de paiement envoyée au parent sur WhatsApp.');
   else if (r === 'nowa') toast('ℹ️ Le numéro du parent n’a pas de compte WhatsApp.');
-  else toast('⚠️ Envoi WhatsApp échoué — nouvel essai automatique plus tard.', 4000);
+  else waShowManualBanner(key, phone, text, s, (waLogGet(key)||{}).e);
   if (currentPage === 'whatsapp') renderWhatsApp();
 }
 /** Mode assisté (sans passerelle) : petit bandeau non bloquant avec le message prêt. */
-function waShowManualBanner(key, phone, text, s){
+function waShowManualBanner(key, phone, text, s, err){
   let b = document.getElementById('waManualBanner');
   if (!b){
     b = document.createElement('div'); b.id = 'waManualBanner';
     b.style.cssText = 'position:fixed;left:50%;bottom:70px;transform:translateX(-50%);z-index:9998;background:#fff;color:#14261b;border:2px solid #16a34a;border-radius:12px;padding:12px 14px;box-shadow:0 10px 28px rgba(0,0,0,.3);max-width:92vw;width:380px;font-size:13px';
     document.body.appendChild(b);
   }
-  b.innerHTML = `<b>📲 Paiement validé</b><div style="margin:4px 0 10px;color:#5f7268">Envoyer la confirmation à ${esc(s.guardian_name||'parent')} (${esc(phone)}) ?</div>
+  b.innerHTML = `<b>📲 Paiement validé</b>${err?`<div style="color:#b91c1c;font-size:12px;margin-top:3px">Passerelle : ${esc(err)}</div>`:''}<div style="margin:4px 0 10px;color:#5f7268">Envoyer la confirmation à ${esc(s.guardian_name||'parent')} (${esc(phone)}) ?</div>
     <div style="display:flex;gap:8px"><button class="fb fb-green fb-sm" style="flex:1" id="waBannerGo">Envoyer sur WhatsApp</button>
     <button class="fb fb-ghost fb-sm" onclick="document.getElementById('waManualBanner').remove()">Plus tard</button></div>`;
   document.getElementById('waBannerGo').onclick = function(){
-    window.open('https://wa.me/' + phone + '?text=' + encodeURIComponent(text), '_blank');
-    waLogSet(key, { t:'paiement', p: phone, s:'manual', n:(s.first_name||'')+' '+(s.last_name||'') });
+    window.open(waLink(phone, text), '_blank');
+    waLogSet(key, { t:'paiement', p: phone, s:'manual', e:'', n:(s.first_name||'')+' '+(s.last_name||'') });
     b.remove();
   };
   clearTimeout(b._t); b._t = setTimeout(()=>{ try{ b.remove(); }catch(e){} }, 60000);
@@ -9490,6 +9564,7 @@ function renderWhatsApp(){
         <div>
           <b>${waAuto()?'🟢 Envoi automatique ACTIF':'🟠 Envoi automatique inactif'}</b>
           <div style="font-size:12.5px;color:var(--muted);margin-top:4px">Passerelle : <b>${esc(provLbl)}</b></div>
+          <div style="font-size:12.5px;color:var(--muted)">Mode de paiement : <b>${payModeCfg().mode==='fin'?'fin du mois':'début du mois'}</b> (limite le ${payModeCfg().limitDay}${payModeCfg().mode==='fin'?' du mois suivant':''})</div>
           <div style="font-size:12.5px;color:var(--muted)">Jours de rappel : <b>${c.days.join(', ')}</b> du mois, à partir de <b>${esc(c.hour)}</b>${isDay?' — <b style="color:var(--brand)">aujourd’hui est un jour de rappel</b>':''}</div>
           <div style="font-size:12.5px;color:var(--muted)">Confirmation de paiement : <b>${c.confirmPayment?('oui, '+c.confirmDelay+' s après '+(c.confirmTrigger==='recorded'?'l’enregistrement':'la validation')):'non'}</b></div>
           <div style="font-size:12.5px;color:var(--muted)">Appareil d'envoi : <b>${c.senderDevice?(esc(c.senderDeviceLabel||'désigné')+(isSender?' (cet appareil)':' (un autre appareil)')):'tout appareil ouvert (fondateur / admin / comptable)'}</b></div>
@@ -9525,6 +9600,7 @@ function renderWhatsApp(){
           <span style="flex:1"></span>
           <button class="fb fb-ghost fb-sm" onclick="waPreview(${i})">👁️ Message</button>
           <button class="fb fb-green fb-sm" onclick="waOpenManual(${i})">📲 Envoyer</button>
+          ${waAuto()?`<button class="fb fb-ghost fb-sm" onclick="waDirect(${i})" title="Ouvrir WhatsApp avec le message">💬</button>`:''}
         </div>
       </div>`;}).join('') : `<div class="empty-state"><div class="em">✅</div>Aucun parent à rappeler : tous les élèves payants sont à jour pour ${esc(monthYearLabel(q.target))}.</div>`}
     </div>
@@ -9550,7 +9626,16 @@ function waPreview(i){
     <pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;max-height:55vh;overflow:auto">${esc(it.text)}</pre>
     <div style="display:flex;gap:8px;margin-top:12px">
       <button class="fb fb-green" style="flex:1" onclick="waOpenManual(${i})">📲 Envoyer</button>
+      <button class="fb fb-ghost" onclick="waDirect(${i})">💬 WhatsApp</button>
       <button class="fb fb-ghost" onclick="closeModal()">Fermer</button></div>`);
+}
+/** Ouverture directe de WhatsApp avec le message rédigé (sans passerelle). */
+function waDirect(i){
+  const it = (window._waQueue||[])[i]; if (!it) return;
+  window.open(waLink(it.phone, it.text), '_blank');
+  waLogSet(it.key, { t: it.type, p: it.phone, s: 'manual', e:'', n: it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', '), m: it.total });
+  closeModal();
+  if (currentPage==='whatsapp') renderWhatsApp();
 }
 /** Envoi unitaire : par la passerelle si elle est active, sinon ouverture de WhatsApp. */
 async function waOpenManual(i){
@@ -9561,10 +9646,12 @@ async function waOpenManual(i){
     if (prev && prev.s==='ok' && !confirm('Ce parent a déjà reçu le rappel aujourd’hui. Renvoyer ?')) return;
     if (prev) delete DB.waLog[it.key];
     toast('Envoi en cours…');
-    const r = await waDeliver(it.key, it.phone, it.text, { t: it.type, n: it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', '), m: it.total });
-    toast(r==='ok' ? '✅ Message envoyé.' : r==='nowa' ? 'ℹ️ Ce numéro n’a pas WhatsApp.' : '⚠️ Échec de l’envoi — voir le journal.');
+    const meta = { t: it.type, n: it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', '), m: it.total };
+    const r = await waDeliver(it.key, it.phone, it.text, meta);
+    if (r === 'fail'){ waFallbackModal(it.phone, it.text, (waLogGet(it.key)||{}).e, it.key, meta); return; }
+    toast(r==='ok' ? '✅ Message envoyé.' : 'ℹ️ Ce numéro n’a pas WhatsApp.');
   } else {
-    window.open('https://wa.me/' + it.phone + '?text=' + encodeURIComponent(it.text), '_blank');
+    window.open(waLink(it.phone, it.text), '_blank');
     waLogSet(it.key, { t: it.type, p: it.phone, s: 'manual', n: it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', '), m: it.total });
   }
   if (currentPage==='whatsapp') renderWhatsApp();
@@ -9616,9 +9703,9 @@ function renderWaConfigModal(){
         <div class="fg" style="margin-top:10px"><label class="fl">apiUrl</label><input class="fi" id="wa_apiUrl" value="${esc(f.apiUrl)}"></div>
         <div class="fg2"><div class="fg"><label class="fl">idInstance</label><input class="fi" id="wa_idInstance" value="${esc(f.idInstance)}"></div>
         <div class="fg"><label class="fl">apiTokenInstance</label><input class="fi" type="password" id="wa_apiToken" value="${esc(f.apiToken)}"></div></div>
-        <div style="font-size:11.5px;color:var(--muted)">Créez une instance sur green-api.com, scannez le QR code avec le WhatsApp du markaz, puis copiez ici les 3 valeurs affichées.</div>`:''}
+        <div style="font-size:11.5px;color:var(--muted)">Créez une instance sur green-api.com, scannez le QR code avec le WhatsApp du markaz, puis copiez ici les 3 valeurs affichées (l'<b>apiUrl</b> est propre à votre instance, ex : https://7103.api.greenapi.com — si elle est mal saisie, l'appli retrouve automatiquement la bonne).</div>`:''}
       ${f.provider==='ultramsg'?`
-        <div class="fg2" style="margin-top:10px"><div class="fg"><label class="fl">Instance ID</label><input class="fi" id="wa_ultraInstance" value="${esc(f.ultraInstance)}" placeholder="instance12345"></div>
+        <div class="fg2" style="margin-top:10px"><div class="fg"><label class="fl">Instance ID</label><input class="fi" id="wa_ultraInstance" value="${esc(f.ultraInstance)}" placeholder="instance12345 ou 12345"></div>
         <div class="fg"><label class="fl">Token</label><input class="fi" type="password" id="wa_ultraToken" value="${esc(f.ultraToken)}"></div></div>
         <div style="font-size:11.5px;color:var(--muted)">Créez une instance sur ultramsg.com et scannez le QR code avec le WhatsApp du markaz.</div>`:''}
       ${f.provider==='custom'?`
@@ -9718,12 +9805,18 @@ async function waTestSend(){
     const phone = waNormPhone(raw);
     if (!phone){ toast('Numéro de test invalide.'); return; }
     toast('Test en cours…');
+    if (DB.waConfig.provider === 'greenapi' || DB.waConfig.provider === 'ultramsg'){
+      const st = await waGatewayState();
+      if (st && !/^(authorized|authenticated)$/i.test(st) && st !== 'inconnu'){
+        toast('⚠️ Passerelle jointe mais WhatsApp non connecté (état : ' + st + '). Scannez le QR code avec le WhatsApp du markaz.', 7000); return;
+      }
+    }
     const has = await waHasWhatsApp(phone);
     if (has === false){ toast('ℹ️ Ce numéro n’a pas de compte WhatsApp.'); return; }
     await waApiSend(phone, `✅ *${DB.centerName||'AGM'}* — Test de la passerelle WhatsApp réussi.`);
     toast('✅ Message de test envoyé à +' + phone, 4000);
   } catch(e){
-    toast('⚠️ Échec : ' + (e && e.message || e) + ' — vérifiez les identifiants.', 6000);
+    toast('⚠️ Échec : ' + (e && e.message || e), 8000);
   } finally {
     DB.waConfig = saved;
   }
@@ -9818,6 +9911,7 @@ function openStudentLedger(studentId){
   const badge = st => st==='payé' ? '<span class="badge badge-green">Payé</span>'
     : st==='partiel' ? '<span class="badge badge-amber">Partiel</span>'
     : st==='impayé' ? '<span class="badge badge-red">Impayé</span>'
+    : st==='en cours' ? '<span class="badge badge-slate">En cours — payable en fin de mois</span>'
     : '<span class="badge badge-slate">—</span>';
   const rows = ledger.slice().reverse().map(mo=>`
     <div style="border:1px solid var(--line);border-radius:9px;padding:9px 11px;margin-bottom:6px;background:var(--panel)">
@@ -9855,10 +9949,12 @@ async function waDebtReminderOne(studentId){
   if (waAuto()){
     toast('Envoi en cours…');
     const key = waDayKey() + '_one_' + s.id + '_' + Date.now().toString(36);
-    const r = await waDeliver(key, phone, text, { t:'dette', n: s.first_name+' '+s.last_name, m: sit.totalDue });
-    toast(r==='ok' ? '✅ Rappel envoyé au parent.' : r==='nowa' ? 'ℹ️ Ce numéro n’a pas WhatsApp.' : '⚠️ Échec de l’envoi.');
+    const meta = { t:'dette', n: s.first_name+' '+s.last_name, m: sit.totalDue };
+    const r = await waDeliver(key, phone, text, meta);
+    if (r === 'fail'){ waFallbackModal(phone, text, (waLogGet(key)||{}).e, key, meta); return; }
+    toast(r==='ok' ? '✅ Rappel envoyé au parent.' : 'ℹ️ Ce numéro n’a pas WhatsApp.');
   } else {
-    window.open('https://wa.me/' + phone + '?text=' + encodeURIComponent(text), '_blank');
+    window.open(waLink(phone, text), '_blank');
   }
 }
 
@@ -9900,8 +9996,8 @@ function bilanDettePage(s){
   const paid = ledger.reduce((a,m)=>a+Math.min(m.paid, m.due||m.paid),0);
   const rest = ledger.reduce((a,m)=>a+m.balance,0);
   const unpaid = ledger.filter(m=>m.balance>0);
-  const stCls = st => st==='payé'?'st-ok':(st==='partiel'?'st-pa':'st-ko');
-  const stLbl = st => st==='payé'?'✔ Payé':(st==='partiel'?'◐ Partiel':(st==='impayé'?'✖ Impayé':'—'));
+  const stCls = st => st==='payé'?'st-ok':(st==='partiel'?'st-pa':(st==='en cours'?'':'st-ko'));
+  const stLbl = st => st==='payé'?'✔ Payé':(st==='partiel'?'◐ Partiel':(st==='impayé'?'✖ Impayé':(st==='en cours'?'En cours (fin de mois)':'—')));
   const pays = (DB.payments||[]).filter(p=>p.student_id===s.id && p.status!=='rejected' && p.label==='Frais de scolarité')
     .sort((a,b)=>(a.date||'').localeCompare(b.date||''));
   const body = `
@@ -10235,6 +10331,110 @@ function ficheShowPreview(){
   try { document.getElementById('fichePrevFrame').srcdoc = ficheHtml(null); } catch(e){}
 }
 try { if (typeof TR === 'object' && TR && !TR['Fiche de renseignement']) TR['Fiche de renseignement'] = { en:'Registration form', ar:'استمارة التسجيل' }; } catch(e){}
+
+/* =====================================================================
+   MODE DE PAIEMENT DES MENSUALITÉS — début de mois ou fin de mois
+   Réglage facultatif (clé payMode). Il s'applique automatiquement :
+   jours des rappels WhatsApp, calcul des retards, textes des messages
+   et fiche de renseignement. Aucune donnée existante n'est modifiée.
+   ===================================================================== */
+function payModeCfg(){
+  const p = DB.payMode || {};
+  const mode = p.mode === 'fin' ? 'fin' : 'debut';
+  const def = mode === 'fin' ? 5 : 10;
+  let limitDay = Math.round(nNum(p.limitDay, def));
+  if (!(limitDay >= 1 && limitDay <= 28)) limitDay = def;
+  return { mode, limitDay, autoDays: p.autoDays !== false };
+}
+/** Jours de rappel recommandés selon le mode. */
+function payModeDays(mode, limitDay){
+  const c = payModeCfg(); mode = mode || c.mode; limitDay = limitDay || c.limitDay;
+  let days;
+  if (mode === 'fin'){
+    days = [25, 28];                                   // annonce avant la fin du mois
+    for (let d = 1; d <= limitDay; d++) days.push(d);  // relances jusqu'à la date limite
+  } else {
+    days = [28, 1];                                    // annonce + jour d'échéance
+    for (let d = Math.min(5, limitDay); d <= limitDay; d++) days.push(d);
+  }
+  return days.filter((v,i,a)=>a.indexOf(v)===i).sort((a,b)=>a-b);
+}
+function payModeEcheanceText(){
+  const c = payModeCfg();
+  return c.mode === 'fin'
+    ? `La mensualité se paie à la fin du mois, au plus tard le ${c.limitDay} du mois suivant`
+    : `La mensualité se paie au début du mois, au plus tard le ${c.limitDay} du mois`;
+}
+/* Calcul des retards : en mode « fin de mois », le mois en cours n'est pas encore dû. */
+(function(){
+  if (window._agmPayModeHooked) return; window._agmPayModeHooked = true;
+  const _ledger = studentDebtLedger;
+  studentDebtLedger = function(){
+    const l = _ledger.apply(this, arguments);
+    if (payModeCfg().mode !== 'fin') return l;
+    const cur = nTodayYM();
+    return l.map(m => (m.ym === cur && m.balance > 0) ? Object.assign({}, m, { balance: 0, status: 'en cours' }) : m);
+  };
+})();
+
+function payModeCardHtml(){
+  const c = payModeCfg();
+  const can = isAdminOrAbove();
+  const opt = (v, ic, t, d) => `<label style="flex:1;min-width:200px;display:flex;gap:10px;align-items:flex-start;border:2px solid ${c.mode===v?'var(--brand)':'var(--line)'};border-radius:12px;padding:11px 12px;cursor:${can?'pointer':'default'};background:${c.mode===v?'rgba(21,128,61,.06)':'transparent'}">
+      <input type="radio" name="pmMode" value="${v}" ${c.mode===v?'checked':''} ${can?'':'disabled'} onchange="payModePreview()" style="margin-top:3px">
+      <span><b>${ic} ${t}</b><span style="display:block;font-size:11.5px;color:var(--muted);margin-top:2px">${d}</span></span></label>`;
+  return `<div class="card" style="margin-bottom:16px;border-left:4px solid var(--brand)">
+    <b>💳 Mode de paiement des mensualités</b>
+    <div style="font-size:12px;color:var(--muted);margin:4px 0 12px">Choisissez quand les parents paient. Les rappels WhatsApp, le calcul des retards et la fiche de renseignement s'adaptent automatiquement.</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+      ${opt('debut','🌅','Début du mois','Payée d’avance : la mensualité du mois est due dès le 1er.')}
+      ${opt('fin','🌇','Fin du mois','Payée à terme échu : le mois se paie quand il se termine.')}
+    </div>
+    <div class="fg2">
+      <div class="fg"><label class="fl" id="pmLimitLbl">${c.mode==='fin'?'Date limite (jour du mois suivant)':'Date limite (jour du mois)'}</label>
+        <input class="fi" type="number" min="1" max="28" id="pmLimit" value="${c.limitDay}" ${can?'':'disabled'} oninput="payModePreview()"></div>
+      <div class="fg" style="display:flex;align-items:flex-end"><label style="display:flex;gap:8px;align-items:center;font-size:12.5px">
+        <input type="checkbox" id="pmAuto" ${c.autoDays?'checked':''} ${can?'':'disabled'} onchange="payModePreview()"> Régler automatiquement les jours de rappel</label></div>
+    </div>
+    <div id="pmPreview" style="font-size:12px;background:var(--panel2);border-radius:9px;padding:9px 11px;margin-bottom:10px">${payModePreviewText(c.mode, c.limitDay, c.autoDays)}</div>
+    ${can?`<button class="fb fb-gold fb-sm" onclick="savePayMode()">💾 Enregistrer le mode de paiement</button>`:''}
+  </div>`;
+}
+function payModePreviewText(mode, limit, auto){
+  const days = payModeDays(mode, limit);
+  const ech = mode === 'fin' ? `payée à la fin du mois, au plus tard le <b>${limit}</b> du mois suivant` : `payée au début du mois, au plus tard le <b>${limit}</b>`;
+  return `📌 Mensualité ${ech}.<br>🔔 Rappels WhatsApp : ${auto ? `les <b>${days.join(', ')}</b> de chaque mois` : 'jours choisis manuellement dans Rappels WhatsApp'}.`
+    + (mode === 'fin' ? `<br>📅 Le mois en cours n'est compté en retard qu'une fois terminé.` : `<br>📅 Le mois en cours est dû dès le 1er.`);
+}
+function payModeReadForm(){
+  const r = document.querySelector('input[name="pmMode"]:checked');
+  const mode = r && r.value === 'fin' ? 'fin' : 'debut';
+  let limit = Math.round(nNum((document.getElementById('pmLimit')||{}).value, mode==='fin'?5:10));
+  if (!(limit >= 1 && limit <= 28)) limit = mode==='fin'?5:10;
+  const auto = !!(document.getElementById('pmAuto')||{}).checked;
+  return { mode, limit, auto };
+}
+function payModePreview(){
+  const f = payModeReadForm();
+  const prevMode = (DB.payMode && DB.payMode.mode) || 'debut';
+  // Changement de mode : on propose la date limite habituelle du nouveau mode.
+  const lim = document.getElementById('pmLimit');
+  if (lim && lim._mode !== f.mode){ if (lim._mode !== undefined || f.mode !== prevMode){ lim.value = f.mode==='fin'?5:10; f.limit = Number(lim.value); } lim._mode = f.mode; }
+  const lbl = document.getElementById('pmLimitLbl'); if (lbl) lbl.textContent = f.mode==='fin' ? 'Date limite (jour du mois suivant)' : 'Date limite (jour du mois)';
+  const pv = document.getElementById('pmPreview'); if (pv) pv.innerHTML = payModePreviewText(f.mode, f.limit, f.auto);
+  document.querySelectorAll('input[name="pmMode"]').forEach(x=>{ const l = x.closest('label'); if (l){ l.style.borderColor = x.checked ? 'var(--brand)' : 'var(--line)'; l.style.background = x.checked ? 'rgba(21,128,61,.06)' : 'transparent'; } });
+}
+function savePayMode(){
+  if (!isAdminOrAbove()){ toast('Réservé au fondateur / administrateur.'); return; }
+  const f = payModeReadForm();
+  DB.payMode = { mode: f.mode, limitDay: f.limit, autoDays: f.auto, updatedAt: Date.now() };
+  // Réglage automatique des jours de rappel WhatsApp selon le mode choisi.
+  if (f.auto && DB.waConfig){ DB.waConfig.days = payModeDays(f.mode, f.limit); }
+  saveDB();
+  logAction('Mode de paiement', (f.mode==='fin'?'Fin du mois':'Début du mois') + ' — limite le ' + f.limit + (f.auto?' (rappels ajustés)':''));
+  toast('✅ Mode de paiement enregistré : ' + (f.mode==='fin'?'fin du mois':'début du mois') + '.');
+  if (currentPage==='settings') renderSettings();
+}
 
 </script>
 </body>
