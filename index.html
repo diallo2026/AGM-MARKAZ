@@ -1548,7 +1548,7 @@ function pageHead(title, sub, actionsHtml){
    après un déploiement, c'est que l'ancienne version est encore en
    cache sur l'appareil.
    ===================================================================== */
-const AGM_VERSION = '2026.10.08-2';
+const AGM_VERSION = '2026.10.08-3';
 
 /** Supprime tout le cache local de l'appli et recharge la dernière version. */
 async function forcerMiseAJour(){
@@ -9083,25 +9083,20 @@ function ficheApplyStudentDefaults(){
 }
 
 /* =====================================================================
-   2) RAPPELS & CONFIRMATIONS WHATSAPP AUTOMATIQUES
+   2) RAPPELS & CONFIRMATIONS WHATSAPP — ENVOI DEPUIS LE WHATSAPP DU MARKAZ
    ---------------------------------------------------------------------
-   Un navigateur ne peut pas envoyer un WhatsApp tout seul : l'envoi
-   automatique passe par une passerelle WhatsApp (Green-API, UltraMsg ou
-   une passerelle personnalisée) reliée au numéro WhatsApp du markaz.
-   Sans passerelle, le module fonctionne en mode « assisté » (un bouton
-   par parent ouvre WhatsApp avec le message déjà rédigé).
+   Aucune passerelle : chaque markaz envoie depuis son propre WhatsApp.
+   L'appli prépare chaque message (montants, mois, arriérés) et ouvre
+   WhatsApp avec le texte déjà écrit ; l'opérateur n'a qu'à appuyer sur ➤.
+   • Rappels du jour : proposés automatiquement les jours de rappel,
+     puis envoyés à la suite, parent par parent (débiteurs en premier).
+   • Confirmation de paiement : proposée quelques secondes après validation.
    ===================================================================== */
-const WA_DEFAULT_DAYS = [28,1,5,6,7,8,9,10];
 function waCfg(){
   const c = DB.waConfig || {};
   const days = nArr(c.days).map(Number).filter(n=>n>=1 && n<=31);
   return {
-    enabled: !!c.enabled,
-    provider: ['greenapi','ultramsg','custom','manual'].includes(c.provider) ? c.provider : 'manual',
-    apiUrl: c.apiUrl || 'https://api.green-api.com',
-    idInstance: c.idInstance || '', apiToken: c.apiToken || '',
-    ultraInstance: c.ultraInstance || '', ultraToken: c.ultraToken || '',
-    customUrl: c.customUrl || '', customAuth: c.customAuth || '',
+    enabled: c.enabled !== false,
     countryCode: String(c.countryCode || '224').replace(/\D/g,''),
     days: days.length ? days.sort((a,b)=>a-b) : payModeDays(),
     hour: c.hour || '09:00',
@@ -9111,23 +9106,9 @@ function waCfg(){
     confirmPayment: c.confirmPayment !== false,
     confirmDelay: nNum(c.confirmDelay, 5),
     confirmTrigger: c.confirmTrigger === 'recorded' ? 'recorded' : 'approved',
-    checkNumbers: c.checkNumbers !== false,
-    senderDevice: c.senderDevice || '',
-    senderDeviceLabel: c.senderDeviceLabel || '',
-    activatedAt: nNum(c.activatedAt, 0),
     intro: c.intro || 'Assalamou alaykoum wa rahmatoullah',
     footer: c.footer || "Merci de passer régler au bureau du markaz. Qu'Allah vous récompense.",
-    gap: Math.max(2, nNum(c.gap, 4)),
   };
-}
-function waAuto(){ const c = waCfg(); return c.enabled && c.provider !== 'manual'; }
-
-/** Identifiant PERSISTANT de cet appareil (pour désigner l'appareil d'envoi). */
-function waDeviceId(){
-  let id = null;
-  try { id = localStorage.getItem('agm_wa_device'); } catch(e){}
-  if (!id){ id = 'wad-' + Math.random().toString(36).slice(2,10); try { localStorage.setItem('agm_wa_device', id); } catch(e){} }
-  return id;
 }
 
 /** Numéro au format international sans « + » (ex : 224623030403). */
@@ -9146,7 +9127,7 @@ function waNormPhone(raw){
   return d.length >= 8 ? d : '';
 }
 
-/* ---- Journal (dédoublonnage : jamais deux fois le même message) ---- */
+/* ---- Journal (dédoublonnage : un parent n'est pas relancé deux fois le même jour) ---- */
 function waLog(){ if (!DB.waLog || typeof DB.waLog !== 'object' || Array.isArray(DB.waLog)) DB.waLog = {}; return DB.waLog; }
 function waLogGet(key){ return (DB.waLog && DB.waLog[key]) || null; }
 function waLogSet(key, entry){
@@ -9158,138 +9139,8 @@ function waLogSet(key, entry){
   saveDB();
 }
 function waDayKey(d){ d = d || new Date(); return d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0'); }
-
-/* ---- Passerelles ----
-   CORRECTIF 404 : Green-API attribue à chaque instance SON adresse (apiUrl), du type
-   https://7103.api.greenapi.com (les 4 premiers chiffres de l'idInstance). Avec
-   l'adresse générique, ou une apiUrl mal collée (« /waInstance… », espace, sans
-   https), le serveur répond 404. L'appli nettoie désormais les identifiants, essaie
-   automatiquement les bonnes adresses et retient celle qui fonctionne. */
-function waClean(v){ return String(v||'').replace(/\s+/g,'').trim(); }
-function waGreenId(c){ return waClean(c.idInstance).replace(/\D/g,''); }
-function waGreenBases(c){
-  const id = waGreenId(c);
-  let u = waClean(c.apiUrl).replace(/\/waInstance.*$/i,'').replace(/\/+$/,'');
-  if (u && !/^https?:\/\//i.test(u)) u = 'https://' + u;
-  const p4 = id.slice(0,4);
-  let cached = null; try { cached = localStorage.getItem('agm_wa_gbase_' + id); } catch(e){}
-  const list = [];
-  [cached, u, p4 && ('https://' + p4 + '.api.greenapi.com'), p4 && ('https://' + p4 + '.api.green-api.com'),
-   'https://api.greenapi.com', 'https://api.green-api.com'].forEach(x=>{ if (x && !list.includes(x)) list.push(x); });
-  return list;
-}
-async function waGreenCall(c, method, body){
-  const id = waGreenId(c), tok = waClean(c.apiToken);
-  if (!id || !tok) throw new Error('Identifiants Green-API manquants (idInstance / apiTokenInstance)');
-  let lastErr = null;
-  for (const base of waGreenBases(c)){
-    let r;
-    try {
-      r = await fetch(base + '/waInstance' + id + '/' + method + '/' + encodeURIComponent(tok),
-        body === undefined ? { method:'GET' } : { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    } catch(e){ lastErr = new Error('Serveur injoignable : ' + base); continue; }
-    if (r.status === 404){ lastErr = new Error('Adresse apiUrl introuvable (404) — copiez l’apiUrl exacte affichée dans votre console Green-API'); continue; }
-    const txt = await r.text(); let j = {}; try { j = JSON.parse(txt); } catch(e){}
-    if (r.status === 401 || r.status === 403) throw new Error('Identifiants refusés : vérifiez idInstance et apiTokenInstance');
-    if (r.status === 466) throw new Error('Limite du forfait Green-API atteinte (le forfait gratuit n’autorise que quelques numéros) — passez au forfait Business');
-    if (!r.ok) throw new Error((j.message || txt || 'Erreur passerelle').toString().slice(0,140) + ' (HTTP ' + r.status + ')');
-    try { localStorage.setItem('agm_wa_gbase_' + id, base); } catch(e){}
-    return j;
-  }
-  throw lastErr || new Error('Passerelle Green-API injoignable');
-}
-function waUltraInstance(c){
-  let i = waClean(c.ultraInstance).replace(/^https?:\/\/api\.ultramsg\.com\//i,'').replace(/\/.*$/,'');
-  if (/^\d+$/.test(i)) i = 'instance' + i;          // « 12345 » → « instance12345 » (sinon 404)
-  return i;
-}
-async function waUltraCall(c, path, opts){
-  const inst = waUltraInstance(c), tok = waClean(c.ultraToken);
-  if (!inst || !tok) throw new Error('Identifiants UltraMsg manquants');
-  let r;
-  try { r = await fetch('https://api.ultramsg.com/' + encodeURIComponent(inst) + path, opts || {}); }
-  catch(e){ throw new Error('Serveur UltraMsg injoignable'); }
-  if (r.status === 404) throw new Error('Instance UltraMsg introuvable (404) : saisissez l’ID sous la forme instance12345');
-  const j = await r.json().catch(()=>({}));
-  if (!r.ok || j.error) throw new Error((j.error && (j.error.message || JSON.stringify(j.error))) || ('Erreur UltraMsg HTTP ' + r.status));
-  return j;
-}
-async function waApiSend(phone, text){
-  const c = waCfg();
-  if (c.provider === 'greenapi'){
-    const j = await waGreenCall(c, 'sendMessage', { chatId: phone + '@c.us', message: text });
-    if (!j.idMessage) throw new Error(j.message || 'Message refusé par Green-API');
-    return j.idMessage;
-  }
-  if (c.provider === 'ultramsg'){
-    const j = await waUltraCall(c, '/messages/chat', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body: new URLSearchParams({ token: waClean(c.ultraToken), to: '+' + phone, body: text }) });
-    if (!(j.sent === 'true' || j.sent === true || j.id)) throw new Error(j.message || 'Message refusé par UltraMsg');
-    return j.id || 'ok';
-  }
-  if (c.provider === 'custom'){
-    const url = String(c.customUrl||'').trim();
-    if (!url) throw new Error('Adresse de la passerelle manquante');
-    const h = {'Content-Type':'application/json'};
-    if (c.customAuth) h['Authorization'] = c.customAuth;
-    let r;
-    try { r = await fetch(url, { method:'POST', headers:h, body: JSON.stringify({ phone, message: text, markaz: DB.centerName || 'AGM' }) }); }
-    catch(e){ throw new Error('Passerelle injoignable : ' + url); }
-    if (r.status === 404) throw new Error('Adresse de la passerelle introuvable (404) : ' + url);
-    if (!r.ok) throw new Error('Erreur passerelle HTTP ' + r.status);
-    return 'ok';
-  }
-  throw new Error('Aucune passerelle configurée');
-}
-/** État de la connexion WhatsApp de la passerelle (pour le test). */
-async function waGatewayState(){
-  const c = waCfg();
-  if (c.provider === 'greenapi'){ const j = await waGreenCall(c, 'getStateInstance'); return j.stateInstance || 'inconnu'; }
-  if (c.provider === 'ultramsg'){ const j = await waUltraCall(c, '/instance/status?token=' + encodeURIComponent(waClean(c.ultraToken))); return (j.status && j.status.accountStatus && j.status.accountStatus.status) || 'inconnu'; }
-  return 'inconnu';
-}
-
-/** Le numéro a-t-il un compte WhatsApp ? true / false / null (inconnu). Résultat
- *  mémorisé 30 jours sur l'appareil pour ne pas interroger la passerelle à chaque fois. */
-async function waHasWhatsApp(phone){
-  const c = waCfg();
-  if (!c.checkNumbers) return null;
-  let cache = {};
-  try { cache = JSON.parse(localStorage.getItem('agm_wa_numcache') || '{}'); } catch(e){}
-  const hit = cache[phone];
-  if (hit && (Date.now() - hit.t) < 30*86400000) return hit.v;
-  let v = null;
-  try {
-    if (c.provider === 'greenapi'){
-      const j = await waGreenCall(c, 'checkWhatsapp', { phoneNumber: Number(phone) });
-      if (typeof j.existsWhatsapp === 'boolean') v = j.existsWhatsapp;
-    } else if (c.provider === 'ultramsg'){
-      const j = await waUltraCall(c, '/contacts/check?token=' + encodeURIComponent(waClean(c.ultraToken)) + '&chatId=' + phone + '@c.us');
-      if (j.status) v = (j.status === 'valid');
-    }
-  } catch(e){ v = null; }   // la vérification ne bloque jamais l'envoi
-  if (v !== null){ cache[phone] = { v, t: Date.now() }; try { localStorage.setItem('agm_wa_numcache', JSON.stringify(cache)); } catch(e){} }
-  return v;
-}
-/** Lien WhatsApp direct (toujours disponible, même si la passerelle est en panne). */
+/** Lien WhatsApp : ouvre la conversation du parent avec le message déjà écrit. */
 function waLink(phone, text){ return 'https://wa.me/' + String(phone||'').replace(/\D/g,'') + '?text=' + encodeURIComponent(text||''); }
-/** Fenêtre de secours : en cas d'échec de la passerelle, le message part à la main en 1 clic. */
-function waFallbackModal(phone, text, err, key, meta){
-  window._waFb = { phone, text, key, meta };
-  openModal(`<h3>⚠️ Envoi automatique impossible</h3>
-    <p style="font-size:12.5px;color:#b91c1c;margin-bottom:10px">${esc(err||'Erreur de la passerelle')}</p>
-    <p style="font-size:12.5px;color:var(--muted);margin-bottom:12px">Vous pouvez envoyer ce message tout de suite par WhatsApp (il est déjà rédigé), puis corriger la passerelle dans ⚙️ Configurer → 🧪 Tester.</p>
-    <div style="display:flex;gap:8px">
-      <button class="fb fb-green" style="flex:1" onclick="waFallbackGo()">💬 Ouvrir WhatsApp</button>
-      <button class="fb fb-ghost" onclick="closeModal()">Fermer</button></div>`);
-}
-function waFallbackGo(){
-  const f = window._waFb || {}; if (!f.phone) return;
-  window.open(waLink(f.phone, f.text), '_blank');
-  if (f.key) waLogSet(f.key, Object.assign({}, f.meta||{}, { p: f.phone, s:'manual', e:'' }));
-  closeModal();
-  if (currentPage==='whatsapp') renderWhatsApp();
-}
 
 /* ---- Rédaction des messages ---- */
 function waReminderTarget(ref){
@@ -9372,68 +9223,8 @@ function waPaymentText(p){
   return t;
 }
 
-/* ---- Envoi d'un message avec journalisation ---- */
-async function waDeliver(key, phone, text, meta){
-  const prev = waLogGet(key);
-  if (prev && (prev.s === 'ok' || prev.s === 'nowa')) return prev.s;
-  const has = await waHasWhatsApp(phone);
-  if (has === false){ waLogSet(key, Object.assign({}, meta, { p: phone, s: 'nowa', e: 'Numéro sans compte WhatsApp' })); return 'nowa'; }
-  let lastErr = null;
-  for (let attempt = 0; attempt < 3; attempt++){
-    try {
-      await waApiSend(phone, text);
-      waLogSet(key, Object.assign({}, meta, { p: phone, s: 'ok', e: '' }));
-      return 'ok';
-    } catch(e){
-      lastErr = e;
-      const msg = String(e && e.message || e);
-      // Erreurs définitives (identifiants, adresse, forfait) : inutile de réessayer.
-      if (/Identifiants|introuvable|forfait|manquant|refusé|non connecté/i.test(msg)) break;
-      if (attempt < 2) await new Promise(r=>setTimeout(r, attempt ? 8000 : 3000));   // réseau / surcharge : nouvel essai
-    }
-  }
-  {
-    const e = lastErr;
-    const tries = (prev && prev.tries || 0) + 1;
-    waLogSet(key, Object.assign({}, meta, { p: phone, s: 'fail', e: String(e && e.message || e).slice(0,160), tries }));
-    return 'fail';
-  }
-}
 
-/* ---- Rappels programmés ---- */
-const WA_RUN = { busy: false, progress: '', lastTick: 0 };
-async function waRunReminders(manual){
-  if (WA_RUN.busy){ toast('Envoi déjà en cours…'); return; }
-  if (!waAuto()){ if (manual) toast('Configurez d’abord une passerelle WhatsApp (mode automatique).'); return; }
-  WA_RUN.busy = true;
-  try {
-    const q = waBuildReminderQueue(new Date());
-    const todo = q.items.filter(it=>{ const l = waLogGet(it.key); return !(l && (l.s==='ok' || l.s==='nowa' || (l.s==='fail' && (l.tries||0) >= 3))); });
-    let ok = 0, ko = 0, nowa = 0, i = 0;
-    for (const it of todo){
-      i++;
-      // Re-vérification juste avant l'envoi : un autre appareil a peut-être déjà envoyé.
-      const l = waLogGet(it.key); if (l && (l.s==='ok' || l.s==='nowa')) continue;
-      WA_RUN.progress = `Envoi ${i}/${todo.length} — ${it.parent || it.phone}`;
-      waRefreshProgress();
-      const r = await waDeliver(it.key, it.phone, it.text, { t: it.type, n: it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', '), m: it.total, ids: it.lines.map(x=>x.s.id).join(',') });
-      if (r==='ok') ok++; else if (r==='nowa') nowa++; else ko++;
-      await new Promise(res=>setTimeout(res, waCfg().gap*1000));
-    }
-    WA_RUN.progress = '';
-    if (todo.length || manual){
-      logAction('Rappels WhatsApp', `${ok} envoyé(s), ${nowa} sans WhatsApp, ${ko} échec(s)`);
-      toast(`📲 Rappels WhatsApp : ${ok} envoyé(s)` + (nowa?`, ${nowa} sans WhatsApp`:'') + (ko?`, ${ko} échec(s)`:''), 5000);
-    }
-    if (ko && manual) setTimeout(()=>waPromptPending(new Date(), true, true), 600);
-  } finally {
-    WA_RUN.busy = false; WA_RUN.progress = '';
-    if (currentPage === 'whatsapp') renderWhatsApp();
-  }
-}
-function waRefreshProgress(){ const el = document.getElementById('waProgress'); if (el) el.textContent = WA_RUN.progress || ''; }
-
-/* ---- Confirmation automatique de paiement (5 s après validation) ---- */
+/* ---- Confirmation de paiement (proposée quelques secondes après validation) ---- */
 function waPaymentEligible(p){
   if (!p || p.status === 'rejected') return false;
   const c = waCfg();
@@ -9447,33 +9238,27 @@ function waOnPaymentEvent(p){
   const id = p.id;
   setTimeout(()=>{ waSendPaymentConfirmation(id); }, Math.max(0, c.confirmDelay) * 1000);
 }
-async function waSendPaymentConfirmation(paymentId, force){
+function waSendPaymentConfirmation(paymentId, force){
   const p = (DB.payments||[]).find(x=>x.id===paymentId);
   if (!p || (!force && !waPaymentEligible(p))) return;
   const key = 'pay_' + p.id;
   const prev = waLogGet(key);
-  if (!force && prev && (prev.s==='ok' || prev.s==='nowa' || prev.s==='manual')) return;
+  if (!force && prev && (prev.s==='ok' || prev.s==='manual')) return;
   const s = (DB.students||[]).find(x=>x.id===p.student_id) || {};
   const phone = waNormPhone(s.guardian_phone);
   if (!phone){ toast('ℹ️ Paiement validé — aucun numéro de parent pour l’envoi WhatsApp.'); return; }
-  const text = waPaymentText(p);
-  if (!waAuto()){ waShowManualBanner(key, phone, text, s); return; }
-  const r = await waDeliver(key, phone, text, { t:'paiement', n: (s.first_name||'')+' '+(s.last_name||''), m: p.amount, ids: s.id||'' });
-  if (r === 'ok') toast('📲 Confirmation de paiement envoyée au parent sur WhatsApp.');
-  else if (r === 'nowa') toast('ℹ️ Le numéro du parent n’a pas de compte WhatsApp.');
-  else waShowManualBanner(key, phone, text, s, (waLogGet(key)||{}).e);
-  if (currentPage === 'whatsapp') renderWhatsApp();
+  waShowManualBanner(key, phone, waPaymentText(p), s);
 }
-/** Mode assisté (sans passerelle) : petit bandeau non bloquant avec le message prêt. */
-function waShowManualBanner(key, phone, text, s, err){
+/** Petit bandeau non bloquant avec le message de confirmation prêt à partir. */
+function waShowManualBanner(key, phone, text, s){
   let b = document.getElementById('waManualBanner');
   if (!b){
     b = document.createElement('div'); b.id = 'waManualBanner';
     b.style.cssText = 'position:fixed;left:50%;bottom:70px;transform:translateX(-50%);z-index:9998;background:#fff;color:#14261b;border:2px solid #16a34a;border-radius:12px;padding:12px 14px;box-shadow:0 10px 28px rgba(0,0,0,.3);max-width:92vw;width:380px;font-size:13px';
     document.body.appendChild(b);
   }
-  b.innerHTML = `<b>📲 Paiement validé</b>${err?`<div style="color:#b91c1c;font-size:12px;margin-top:3px">Passerelle : ${esc(err)}</div>`:''}<div style="margin:4px 0 10px;color:#5f7268">Envoyer la confirmation à ${esc(s.guardian_name||'parent')} (${esc(phone)}) ?</div>
-    <div style="display:flex;gap:8px"><button class="fb fb-green fb-sm" style="flex:1" id="waBannerGo">Envoyer sur WhatsApp</button>
+  b.innerHTML = `<b>📲 Paiement validé</b><div style="margin:4px 0 10px;color:#5f7268">Envoyer la confirmation à ${esc(s.guardian_name||'parent')} (${esc(phone)}) ?</div>
+    <div style="display:flex;gap:8px"><button class="fb fb-green fb-sm" style="flex:1" id="waBannerGo">💬 Envoyer sur WhatsApp</button>
     <button class="fb fb-ghost fb-sm" onclick="document.getElementById('waManualBanner').remove()">Plus tard</button></div>`;
   document.getElementById('waBannerGo').onclick = function(){
     window.open(waLink(phone, text), '_blank');
@@ -9483,53 +9268,16 @@ function waShowManualBanner(key, phone, text, s, err){
   clearTimeout(b._t); b._t = setTimeout(()=>{ try{ b.remove(); }catch(e){} }, 60000);
 }
 
-/** Filet de sécurité : paiements validés récemment mais pas encore confirmés
- *  (ex : validé sur un autre appareil, ou réseau coupé au moment de l'envoi). */
-async function waScanPaymentConfirmations(){
-  const c = waCfg();
-  if (!c.confirmPayment || !c.activatedAt) return;
-  const now = Date.now();
-  const list = (DB.payments||[]).filter(p=>{
-    if (!waPaymentEligible(p)) return false;
-    const at = p.status==='approved' ? Number(p.approved_at||0) : waIdTime(p.id);
-    if (!at || at < c.activatedAt || at > now - 2*60000 || at < now - 3*86400000) return false;
-    const l = waLogGet('pay_' + p.id);
-    return !(l && (l.s==='ok' || l.s==='nowa' || l.s==='manual' || (l.s==='fail' && (l.tries||0) >= 3)));
-  });
-  for (const p of list.slice(0,10)){
-    await waSendPaymentConfirmation(p.id);
-    await new Promise(r=>setTimeout(r, c.gap*1000));
-  }
-}
-function waIdTime(id){ try { const m = String(id||'').split('_')[1]; return parseInt(m.slice(0, m.length-5), 36) || 0; } catch(e){ return 0; } }
-
-/* ---- Horloge : vérifie chaque minute (application ouverte) ---- */
-async function waTick(){
+/* ---- Horloge : chaque minute, les jours de rappel, l'appli propose les rappels du jour ---- */
+function waTick(){
   try {
     if (!SESSION || !DB || typeof currentUser !== 'function') return;
     const u = currentUser(); if (!u || !['fondateur','admin','comptable'].includes(u.role)) return;
     const c = waCfg();
-    if (c.senderDevice && c.senderDevice !== waDeviceId()) return;   // un seul appareil d'envoi désigné
-    if (WA_RUN.busy || WA_SEQ) return;
+    if (!c.enabled || !c.promptAssisted || WA_SEQ) return;
     const now = new Date();
     const hm = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0');
-    const isDay = c.days.includes(now.getDate()) && hm >= c.hour;
-    if (!waAuto()){
-      // Mode assisté (sans passerelle) : à l'heure des rappels, l'appli PROPOSE d'elle-même
-      // l'envoi des rappels du jour (débiteurs en premier), comme pour les reçus de paiement.
-      if (isDay && c.promptAssisted) waPromptPending(now, false);
-      return;
-    }
-    await waScanPaymentConfirmations();
-    if (!isDay) return;
-    // Petit délai aléatoire : si plusieurs appareils sont ouverts, le premier envoie
-    // et les autres voient le journal synchronisé avant de commencer.
-    await new Promise(r=>setTimeout(r, Math.random()*15000));
-    if (WA_RUN.busy) return;
-    const q = waBuildReminderQueue(now);
-    const pending = q.items.some(it=>{ const l = waLogGet(it.key); return !(l && (l.s==='ok' || l.s==='nowa' || (l.s==='fail' && (l.tries||0) >= 3))); });
-    if (pending) await waRunReminders(false);
-    waPromptPending(now, true);   // ce qui n'a pas pu partir par la passerelle est proposé à l'envoi manuel
+    if (c.days.includes(now.getDate()) && hm >= c.hour) waPromptPending(now, false);
   } catch(e){ console.warn('AGM WhatsApp: tick', e && e.message); }
 }
 if (!window._agmWaTimer){
@@ -9549,10 +9297,7 @@ if (!window._agmWaTimer){
     const r = _app.apply(this, arguments);
     try {
       const after = (DB.payments||[]).find(x=>x.id===paymentId);
-      if (wasPending && after && after.status === 'approved'){
-        // Si une confirmation « en attente » était déjà partie (déclencheur = enregistrement), on n'en renvoie pas.
-        waOnPaymentEvent(after);
-      }
+      if (wasPending && after && after.status === 'approved') waOnPaymentEvent(after);
     } catch(e){}
     return r;
   };
@@ -9567,46 +9312,36 @@ function renderWhatsApp(){
   const isDay = c.days.includes(new Date().getDate());
   const debtors = nPayingStudents().filter(s=>nDebtSituation(s, nTodayYM()).arrearsAmount > 0);
   const totalDebt = debtors.reduce((a,s)=>a+nDebtSituation(s, nTodayYM()).arrearsAmount,0);
-  const provLbl = { manual:'Mode assisté (sans passerelle)', greenapi:'Green-API', ultramsg:'UltraMsg', custom:'Passerelle personnalisée' }[c.provider];
-  const isSender = !c.senderDevice || c.senderDevice === waDeviceId();
+  const pending = q.items.filter(it=>{ const l = waLogGet(it.key); return !(l && (l.s==='ok' || l.s==='manual')); });
   const logs = Object.entries(DB.waLog||{}).map(([k,v])=>Object.assign({key:k}, v)).sort((a,b)=>(b.at||0)-(a.at||0)).slice(0,80);
-  const stBadge = s => s==='ok' ? '<span class="badge badge-green">Envoyé</span>'
+  const stBadge = s => (s==='ok' || s==='manual') ? '<span class="badge badge-green">Envoyé</span>'
     : s==='nowa' ? '<span class="badge badge-slate">Sans WhatsApp</span>'
-    : s==='manual' ? '<span class="badge badge-gold">Ouvert manuellement</span>'
-    : '<span class="badge badge-red">Échec</span>';
-  const typeLbl = t => ({ dette:'Rappel + arriérés', rappel:'Rappel mensualité', paiement:'Confirmation paiement', test:'Test' }[t] || t || '—');
+    : '<span class="badge badge-red">Non envoyé</span>';
+  const typeLbl = t => ({ dette:'Rappel + arriérés', rappel:'Rappel mensualité', paiement:'Confirmation paiement' }[t] || t || '—');
 
   document.getElementById('pageContent').innerHTML = `
-    ${pageHead('Rappels WhatsApp', 'Rappels de mensualité, relances des dettes et confirmations de paiement automatiques',
-      (can?`<button class="fb fb-gold" onclick="openWaConfig()">⚙️ Configurer</button> `:'') +
-      `<button class="fb fb-green" onclick="waManualRun()">▶️ Envoyer les rappels maintenant</button>`)}
+    ${pageHead('Rappels WhatsApp', 'Rappels de mensualité, relances des dettes et confirmations de paiement — envoyés depuis le WhatsApp du markaz',
+      (can?`<button class="fb fb-ghost" onclick="openWaConfig()">⚙️ Réglages</button>`:''))}
 
-    <div class="card" style="margin-bottom:14px;border-left:4px solid ${waAuto()?'#16a34a':'#f59e0b'}">
-      <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start">
-        <div>
-          <b>${waAuto()?'🟢 Envoi automatique ACTIF':'🟠 Envoi automatique inactif'}</b>
-          <div style="font-size:12.5px;color:var(--muted);margin-top:4px">Passerelle : <b>${esc(provLbl)}</b></div>
-          <div style="font-size:12.5px;color:var(--muted)">Mode de paiement : <b>${payModeCfg().mode==='fin'?'fin du mois':'début du mois'}</b> (limite le ${payModeCfg().limitDay}${payModeCfg().mode==='fin'?' du mois suivant':''})</div>
-          <div style="font-size:12.5px;color:var(--muted)">Jours de rappel : <b>${c.days.join(', ')}</b> du mois, à partir de <b>${esc(c.hour)}</b>${isDay?' — <b style="color:var(--brand)">aujourd’hui est un jour de rappel</b>':''}</div>
-          <div style="font-size:12.5px;color:var(--muted)">Confirmation de paiement : <b>${c.confirmPayment?('oui, '+c.confirmDelay+' s après '+(c.confirmTrigger==='recorded'?'l’enregistrement':'la validation')):'non'}</b></div>
-          <div style="font-size:12.5px;color:var(--muted)">Appareil d'envoi : <b>${c.senderDevice?(esc(c.senderDeviceLabel||'désigné')+(isSender?' (cet appareil)':' (un autre appareil)')):'tout appareil ouvert (fondateur / admin / comptable)'}</b></div>
-        </div>
-      </div>
-      ${!waAuto()?`<div style="margin-top:10px;font-size:12px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);border-radius:8px;padding:9px 10px">
-        Pour que les messages partent <b>tout seuls</b>, reliez le numéro WhatsApp du markaz à une passerelle (⚙️ Configurer). En attendant, utilisez les boutons 📲 ci-dessous : WhatsApp s'ouvre avec le message déjà rédigé.</div>`:''}
-      <div id="waProgress" style="margin-top:8px;font-size:12.5px;font-weight:700;color:var(--brand)">${esc(WA_RUN.progress||'')}</div>
+    <div class="card" style="margin-bottom:14px;border-left:4px solid ${c.enabled?'#16a34a':'#f59e0b'}">
+      <b>${c.enabled?'🟢 Rappels activés':'🟠 Rappels désactivés'}</b>
+      <div style="font-size:12.5px;color:var(--muted);margin-top:4px">Mode de paiement : <b>${payModeCfg().mode==='fin'?'fin du mois':'début du mois'}</b> (limite le ${payModeCfg().limitDay}${payModeCfg().mode==='fin'?' du mois suivant':''})</div>
+      <div style="font-size:12.5px;color:var(--muted)">Jours de rappel : <b>${c.days.join(', ')}</b> du mois, à partir de <b>${esc(c.hour)}</b>${isDay?' — <b style="color:var(--brand)">aujourd’hui est un jour de rappel</b>':''}</div>
+      <div style="font-size:12.5px;color:var(--muted)">Confirmation de paiement : <b>${c.confirmPayment?('proposée '+c.confirmDelay+' s après '+(c.confirmTrigger==='recorded'?'l’enregistrement':'la validation')):'non'}</b></div>
+      <div style="font-size:12px;margin-top:8px;background:var(--panel2);border-radius:8px;padding:8px 10px">
+        Les messages partent de <b>votre WhatsApp</b> : chaque message est déjà rédigé, vous n'avez qu'à appuyer sur ➤ dans WhatsApp, puis le parent suivant s'affiche.</div>
+      <button class="fb fb-green" style="width:100%;margin-top:12px;padding:14px;font-size:15px" onclick="waStartGuided()" ${pending.length?'':'disabled'}>
+        📲 Envoyer les rappels du jour à tous les parents (${pending.length})</button>
     </div>
 
     <div class="kpi-grid">
-      <div class="kpi"><div class="kl">Parents à rappeler</div><div class="kv">${q.items.length}</div></div>
+      <div class="kpi"><div class="kl">Parents à rappeler</div><div class="kv">${pending.length} <span style="font-size:13px;color:var(--muted)">/ ${q.items.length}</span></div></div>
       <div class="kpi red"><div class="kl">Élèves avec arriérés</div><div class="kv">${debtors.length}</div></div>
       <div class="kpi red"><div class="kl">Total des arriérés</div><div class="kv" style="font-size:18px">${fmtGNF(totalDebt)}</div></div>
       <div class="kpi gold"><div class="kl">Élèves sans numéro</div><div class="kv">${q.noPhone.length}</div></div>
     </div>
 
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0 10px">
-      <b>📋 Messages préparés — mensualité visée : ${esc(monthYearLabel(q.target))}</b>
-    </div>
+    <div style="margin:6px 0 10px"><b>📋 Messages préparés — mensualité visée : ${esc(monthYearLabel(q.target))}</b></div>
     <div id="waQueue">
     ${q.items.length ? q.items.map((it,i)=>{
       const l = waLogGet(it.key);
@@ -9618,12 +9353,10 @@ function renderWhatsApp(){
             <div style="font-weight:800;margin-top:4px;color:${it.type==='dette'?'#b91c1c':'inherit'}">${fmtGNF(it.total)}</div></div>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;align-items:center">
-          ${l?stBadge(l.s)+` <span style="font-size:11px;color:var(--muted)">${new Date(l.at).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}</span>`:'<span class="badge badge-slate">Pas encore envoyé aujourd’hui</span>'}
-          ${l&&l.s==='fail'&&l.e?`<div style="width:100%;font-size:11.5px;color:#b91c1c">Raison : ${esc(l.e)}</div>`:''}
+          ${l&&(l.s==='ok'||l.s==='manual')?stBadge(l.s)+` <span style="font-size:11px;color:var(--muted)">${new Date(l.at).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}</span>`:'<span class="badge badge-slate">Pas encore envoyé aujourd’hui</span>'}
           <span style="flex:1"></span>
           <button class="fb fb-ghost fb-sm" onclick="waPreview(${i})">👁️ Message</button>
-          <button class="fb fb-green fb-sm" onclick="waOpenManual(${i})">📲 Envoyer</button>
-          ${waAuto()?`<button class="fb fb-ghost fb-sm" onclick="waDirect(${i})" title="Ouvrir WhatsApp avec le message">💬</button>`:''}
+          <button class="fb fb-green fb-sm" onclick="waDirect(${i})">📲 Envoyer</button>
         </div>
       </div>`;}).join('') : `<div class="empty-state"><div class="em">✅</div>Aucun parent à rappeler : tous les élèves payants sont à jour pour ${esc(monthYearLabel(q.target))}.</div>`}
     </div>
@@ -9636,8 +9369,7 @@ function renderWhatsApp(){
     <div style="margin:18px 0 10px"><b>🕓 Journal des envois</b></div>
     ${logs.length ? logs.map(l=>`<div class="card" style="margin-bottom:8px;padding:10px 13px">
         <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
-          <div style="min-width:0"><b style="font-size:13px">${esc(typeLbl(l.t))}</b> <span style="color:var(--muted);font-size:12px">· ${esc(l.n||'')} · +${esc(l.p||'')}</span>
-            ${l.e?`<div style="font-size:11.5px;color:#b91c1c;margin-top:2px">${esc(l.e)}</div>`:''}</div>
+          <div style="min-width:0"><b style="font-size:13px">${esc(typeLbl(l.t))}</b> <span style="color:var(--muted);font-size:12px">· ${esc(l.n||'')} · +${esc(l.p||'')}</span></div>
           <div style="text-align:right;font-size:12px">${stBadge(l.s)}<div style="color:var(--muted);margin-top:3px">${new Date(l.at).toLocaleString('fr-FR')}</div></div>
         </div></div>`).join('')
       : `<div class="empty-state" style="padding:24px"><div class="em">📭</div>Aucun envoi pour l'instant.</div>`}`;
@@ -9648,11 +9380,10 @@ function waPreview(i){
   openModal(`<h3>👁️ Message pour ${esc(it.parent||'le parent')}</h3>
     <pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;max-height:55vh;overflow:auto">${esc(it.text)}</pre>
     <div style="display:flex;gap:8px;margin-top:12px">
-      <button class="fb fb-green" style="flex:1" onclick="waOpenManual(${i})">📲 Envoyer</button>
-      <button class="fb fb-ghost" onclick="waDirect(${i})">💬 WhatsApp</button>
+      <button class="fb fb-green" style="flex:1" onclick="waDirect(${i})">📲 Envoyer sur WhatsApp</button>
       <button class="fb fb-ghost" onclick="closeModal()">Fermer</button></div>`);
 }
-/** Ouverture directe de WhatsApp avec le message rédigé (sans passerelle). */
+/** Envoi à un parent : ouvre WhatsApp avec le message rédigé. */
 function waDirect(i){
   const it = (window._waQueue||[])[i]; if (!it) return;
   window.open(waLink(it.phone, it.text), '_blank');
@@ -9660,33 +9391,9 @@ function waDirect(i){
   closeModal();
   if (currentPage==='whatsapp') renderWhatsApp();
 }
-/** Envoi unitaire : par la passerelle si elle est active, sinon ouverture de WhatsApp. */
-async function waOpenManual(i){
-  const it = (window._waQueue||[])[i]; if (!it) return;
-  closeModal();
-  if (waAuto()){
-    const prev = waLogGet(it.key);
-    if (prev && prev.s==='ok' && !confirm('Ce parent a déjà reçu le rappel aujourd’hui. Renvoyer ?')) return;
-    if (prev) delete DB.waLog[it.key];
-    toast('Envoi en cours…');
-    const meta = { t: it.type, n: it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', '), m: it.total };
-    const r = await waDeliver(it.key, it.phone, it.text, meta);
-    if (r === 'fail'){ waFallbackModal(it.phone, it.text, (waLogGet(it.key)||{}).e, it.key, meta); return; }
-    toast(r==='ok' ? '✅ Message envoyé.' : 'ℹ️ Ce numéro n’a pas WhatsApp.');
-  } else {
-    window.open(waLink(it.phone, it.text), '_blank');
-    waLogSet(it.key, { t: it.type, p: it.phone, s: 'manual', n: it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', '), m: it.total });
-  }
-  if (currentPage==='whatsapp') renderWhatsApp();
-}
-function waManualRun(){
-  if (!waAuto()){ waStartGuided(); return; }
-  if (!confirm('Envoyer maintenant les rappels à tous les parents de la liste (ceux qui l’ont déjà reçu aujourd’hui sont ignorés) ?')) return;
-  waRunReminders(true);
-  setTimeout(()=>{ if (currentPage==='whatsapp') renderWhatsApp(); }, 300);
-}
+function waManualRun(){ waStartGuided(); }
 
-/* ---- Configuration WhatsApp ---- */
+/* ---- Réglages des rappels ---- */
 let WA_EDIT = null;
 function openWaConfig(){
   if (!isAdminOrAbove()){ toast('Réservé au fondateur / administrateur.'); return; }
@@ -9697,71 +9404,39 @@ function waCollect(){
   const f = WA_EDIT; if (!f) return;
   const v = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
   const ck = id => { const el = document.getElementById(id); return el ? !!el.checked : undefined; };
-  ['provider','apiUrl','idInstance','apiToken','ultraInstance','ultraToken','customUrl','customAuth','countryCode','hour','confirmTrigger','intro','footer']
-    .forEach(k=>{ const x = v('wa_'+k); if (x !== undefined) f[k] = String(x).trim(); });
-  ['enabled','remindUpcoming','remindDebt','confirmPayment','checkNumbers','promptAssisted'].forEach(k=>{ const x = ck('wa_'+k); if (x !== undefined) f[k] = x; });
+  ['countryCode','hour','confirmTrigger','intro','footer'].forEach(k=>{ const x = v('wa_'+k); if (x !== undefined) f[k] = String(x).trim(); });
+  ['enabled','remindUpcoming','remindDebt','confirmPayment','promptAssisted'].forEach(k=>{ const x = ck('wa_'+k); if (x !== undefined) f[k] = x; });
   const dl = v('wa_confirmDelay'); if (dl !== undefined) f.confirmDelay = Math.max(0, nNum(dl,5));
-  const gp = v('wa_gap'); if (gp !== undefined) f.gap = Math.max(2, nNum(gp,4));
   const days = Array.from(document.querySelectorAll('.waDayChk')); if (days.length) f.days = days.filter(x=>x.checked).map(x=>Number(x.value));
 }
 function renderWaConfigModal(){
   const f = WA_EDIT;
   const box = 'background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:12px 13px;margin-bottom:12px';
-  const isSender = f.senderDevice && f.senderDevice === waDeviceId();
   openModal(`
-    <h3 style="margin-bottom:4px">📲 Rappels WhatsApp automatiques</h3>
-    <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Les messages partent depuis le numéro WhatsApp du markaz relié à la passerelle choisie.</p>
+    <h3 style="margin-bottom:4px">📲 Réglages des rappels WhatsApp</h3>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Les messages sont envoyés depuis le WhatsApp de l'appareil utilisé (fondateur ou comptable).</p>
 
-    <label style="display:flex;gap:8px;align-items:center;font-weight:700;margin-bottom:12px"><input type="checkbox" id="wa_enabled" ${f.enabled?'checked':''}> Activer les envois automatiques</label>
-
-    <div style="${box}">
-      <div class="fl" style="margin-bottom:8px">🔌 Passerelle WhatsApp</div>
-      <select class="fi" id="wa_provider" onchange="waCollect();renderWaConfigModal()">
-        <option value="manual" ${f.provider==='manual'?'selected':''}>Mode assisté — sans passerelle (un clic par parent)</option>
-        <option value="greenapi" ${f.provider==='greenapi'?'selected':''}>Green-API (recommandé)</option>
-        <option value="ultramsg" ${f.provider==='ultramsg'?'selected':''}>UltraMsg</option>
-        <option value="custom" ${f.provider==='custom'?'selected':''}>Passerelle personnalisée (URL)</option>
-      </select>
-      ${f.provider==='greenapi'?`
-        <div class="fg" style="margin-top:10px"><label class="fl">apiUrl</label><input class="fi" id="wa_apiUrl" value="${esc(f.apiUrl)}"></div>
-        <div class="fg2"><div class="fg"><label class="fl">idInstance</label><input class="fi" id="wa_idInstance" value="${esc(f.idInstance)}"></div>
-        <div class="fg"><label class="fl">apiTokenInstance</label><input class="fi" type="password" id="wa_apiToken" value="${esc(f.apiToken)}"></div></div>
-        <div style="font-size:11.5px;color:var(--muted)">Créez une instance sur green-api.com, scannez le QR code avec le WhatsApp du markaz, puis copiez ici les 3 valeurs affichées (l'<b>apiUrl</b> est propre à votre instance, ex : https://7103.api.greenapi.com — si elle est mal saisie, l'appli retrouve automatiquement la bonne).</div>`:''}
-      ${f.provider==='ultramsg'?`
-        <div class="fg2" style="margin-top:10px"><div class="fg"><label class="fl">Instance ID</label><input class="fi" id="wa_ultraInstance" value="${esc(f.ultraInstance)}" placeholder="instance12345 ou 12345"></div>
-        <div class="fg"><label class="fl">Token</label><input class="fi" type="password" id="wa_ultraToken" value="${esc(f.ultraToken)}"></div></div>
-        <div style="font-size:11.5px;color:var(--muted)">Créez une instance sur ultramsg.com et scannez le QR code avec le WhatsApp du markaz.</div>`:''}
-      ${f.provider==='custom'?`
-        <div class="fg" style="margin-top:10px"><label class="fl">URL (reçoit un POST JSON {phone, message, markaz})</label><input class="fi" id="wa_customUrl" value="${esc(f.customUrl)}" placeholder="https://…"></div>
-        <div class="fg"><label class="fl">En-tête Authorization (facultatif)</label><input class="fi" type="password" id="wa_customAuth" value="${esc(f.customAuth)}" placeholder="Bearer …"></div>`:''}
-      ${f.provider!=='manual'?`
-        <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-top:6px"><input type="checkbox" id="wa_checkNumbers" ${f.checkNumbers?'checked':''}> Vérifier que chaque numéro possède un compte WhatsApp avant l'envoi</label>
-        <div style="display:flex;gap:6px;margin-top:10px">
-          <input class="fi" id="waTestPhone" placeholder="N° de test (ex : 623030403)" style="flex:1">
-          <button type="button" class="fb fb-ghost fb-sm" onclick="waTestSend()">🧪 Tester</button>
-        </div>`:''}
-      <div class="fg2" style="margin-top:10px">
-        <div class="fg"><label class="fl">Indicatif pays</label><input class="fi" id="wa_countryCode" value="${esc(f.countryCode)}" placeholder="224"></div>
-        <div class="fg"><label class="fl">Pause entre 2 messages (s)</label><input class="fi" type="number" min="2" id="wa_gap" value="${f.gap}"></div>
-      </div>
-    </div>
+    <label style="display:flex;gap:8px;align-items:center;font-weight:700;margin-bottom:12px"><input type="checkbox" id="wa_enabled" ${f.enabled?'checked':''}> Activer les rappels et les confirmations WhatsApp</label>
 
     <div style="${box}">
       <div class="fl" style="margin-bottom:8px">🔔 Rappels de paiement</div>
-      <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Jours du mois où les rappels partent :</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Jours du mois où les rappels sont proposés :</div>
       <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:10px">
         ${Array.from({length:31},(_,i)=>i+1).map(dn=>`<label style="display:flex;flex-direction:column;align-items:center;font-size:11px;padding:3px;border:1px solid var(--line);border-radius:6px;${f.days.includes(dn)?'background:rgba(22,163,74,.12)':''}">
           <input type="checkbox" class="waDayChk" value="${dn}" ${f.days.includes(dn)?'checked':''}>${dn}</label>`).join('')}
       </div>
-      <div class="fg"><label class="fl">À partir de l'heure</label><input class="fi" type="time" id="wa_hour" value="${esc(f.hour)}"></div>
-      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-bottom:6px"><input type="checkbox" id="wa_remindUpcoming" ${f.remindUpcoming?'checked':''}> Rappeler la mensualité aux parents à jour (le 28 : mois suivant ; du 1 au 10 : mois en cours)</label>
+      <div class="fg2">
+        <div class="fg"><label class="fl">À partir de l'heure</label><input class="fi" type="time" id="wa_hour" value="${esc(f.hour)}"></div>
+        <div class="fg"><label class="fl">Indicatif pays</label><input class="fi" id="wa_countryCode" value="${esc(f.countryCode)}" placeholder="224"></div>
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-bottom:6px"><input type="checkbox" id="wa_remindUpcoming" ${f.remindUpcoming?'checked':''}> Rappeler la mensualité aux parents à jour</label>
       <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-bottom:6px"><input type="checkbox" id="wa_remindDebt" ${f.remindDebt?'checked':''}> Relancer les parents ayant des dettes, avec le détail des mois et le montant</label>
-      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input type="checkbox" id="wa_promptAssisted" ${f.promptAssisted?'checked':''}> Sans passerelle : proposer automatiquement l'envoi des rappels du jour à l'ouverture de l'appli</label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input type="checkbox" id="wa_promptAssisted" ${f.promptAssisted?'checked':''}> Afficher automatiquement « Rappels du jour » à l'ouverture de l'appli</label>
     </div>
 
     <div style="${box}">
       <div class="fl" style="margin-bottom:8px">✅ Confirmation de paiement</div>
-      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-bottom:8px"><input type="checkbox" id="wa_confirmPayment" ${f.confirmPayment?'checked':''}> Envoyer automatiquement la confirmation au parent</label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-bottom:8px"><input type="checkbox" id="wa_confirmPayment" ${f.confirmPayment?'checked':''}> Proposer l'envoi de la confirmation au parent après chaque paiement</label>
       <div class="fg2">
         <div class="fg"><label class="fl">Délai (secondes)</label><input class="fi" type="number" min="0" id="wa_confirmDelay" value="${f.confirmDelay}"></div>
         <div class="fg"><label class="fl">Déclencheur</label><select class="fi" id="wa_confirmTrigger">
@@ -9776,84 +9451,32 @@ function renderWaConfigModal(){
       <div class="fg"><label class="fl">Formule de fin</label><input class="fi" id="wa_footer" value="${esc(f.footer)}"></div>
     </div>
 
-    <div style="${box}">
-      <div class="fl" style="margin-bottom:6px">📌 Appareil d'envoi</div>
-      <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Les rappels partent depuis un appareil où l'application est ouverte et connectée. Désignez de préférence un appareil qui reste allumé (ex : le téléphone ou l'ordinateur du bureau).</div>
-      <div style="font-size:12.5px;margin-bottom:8px">Actuel : <b>${f.senderDevice?(esc(f.senderDeviceLabel||'désigné')+(isSender?' — cet appareil':' — un autre appareil')):'Tout appareil ouvert'}</b></div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
-        <button type="button" class="fb fb-ghost fb-sm" onclick="waSetSenderHere()">📌 Désigner cet appareil</button>
-        ${f.senderDevice?`<button type="button" class="fb fb-ghost fb-sm" onclick="waCollect();WA_EDIT.senderDevice='';WA_EDIT.senderDeviceLabel='';renderWaConfigModal()">↺ Tout appareil</button>`:''}
-      </div>
-    </div>
-
     <div style="display:flex;gap:8px">
       <button class="fb fb-gold" style="flex:1" onclick="saveWaConfig()">💾 Enregistrer</button>
       <button class="fb fb-ghost" onclick="closeModal()">Annuler</button>
     </div>`);
-}
-function waSetSenderHere(){
-  waCollect();
-  const u = currentUser() || {};
-  const ua = navigator.userAgent || '';
-  const kind = /Android|iPhone|iPad|Mobile/i.test(ua) ? 'Téléphone' : 'Ordinateur';
-  WA_EDIT.senderDevice = waDeviceId();
-  WA_EDIT.senderDeviceLabel = kind + ' de ' + ((u.first_name||'') + ' ' + (u.last_name||'')).trim();
-  renderWaConfigModal();
-  toast('Cet appareil sera l’appareil d’envoi (pensez à enregistrer).');
 }
 function saveWaConfig(){
   if (!isAdminOrAbove()) return;
   waCollect();
   const f = nClone(WA_EDIT);
   if (!f.days.length){ toast('Cochez au moins un jour de rappel.'); return; }
-  if (f.enabled && f.provider==='greenapi' && (!f.idInstance || !f.apiToken)){ toast('Renseignez idInstance et apiTokenInstance.'); return; }
-  if (f.enabled && f.provider==='ultramsg' && (!f.ultraInstance || !f.ultraToken)){ toast('Renseignez l’instance et le token UltraMsg.'); return; }
-  if (f.enabled && f.provider==='custom' && !f.customUrl){ toast('Renseignez l’URL de la passerelle.'); return; }
-  const old = DB.waConfig || {};
-  // Date d'activation : seuls les paiements validés APRÈS l'activation déclenchent une confirmation
-  // (on n'envoie jamais de confirmations pour l'historique déjà existant).
-  f.activatedAt = (f.enabled && !(old.enabled)) ? Date.now() : (old.activatedAt || (f.enabled ? Date.now() : 0));
-  DB.waConfig = f;
+  DB.waConfig = f;      // les anciens réglages de passerelle ne sont plus utilisés
   saveDB();
-  logAction('Rappels WhatsApp', 'Configuration mise à jour (' + (f.enabled?'activé':'désactivé') + ', ' + f.provider + ')');
+  logAction('Rappels WhatsApp', 'Réglages mis à jour (' + (f.enabled?'activés':'désactivés') + ')');
   closeModal();
   toast('✅ Réglages WhatsApp enregistrés.');
   if (currentPage==='whatsapp') renderWhatsApp(); else if (currentPage==='settings') renderSettings();
-}
-async function waTestSend(){
-  waCollect();
-  const raw = (document.getElementById('waTestPhone')||{}).value;
-  const saved = DB.waConfig;
-  DB.waConfig = nClone(WA_EDIT);          // test avec les valeurs saisies (non enregistrées)
-  try {
-    const phone = waNormPhone(raw);
-    if (!phone){ toast('Numéro de test invalide.'); return; }
-    toast('Test en cours…');
-    if (DB.waConfig.provider === 'greenapi' || DB.waConfig.provider === 'ultramsg'){
-      const st = await waGatewayState();
-      if (st && !/^(authorized|authenticated)$/i.test(st) && st !== 'inconnu'){
-        toast('⚠️ Passerelle jointe mais WhatsApp non connecté (état : ' + st + '). Scannez le QR code avec le WhatsApp du markaz.', 7000); return;
-      }
-    }
-    const has = await waHasWhatsApp(phone);
-    if (has === false){ toast('ℹ️ Ce numéro n’a pas de compte WhatsApp.'); return; }
-    await waApiSend(phone, `✅ *${DB.centerName||'AGM'}* — Test de la passerelle WhatsApp réussi.`);
-    toast('✅ Message de test envoyé à +' + phone, 4000);
-  } catch(e){
-    toast('⚠️ Échec : ' + (e && e.message || e), 8000);
-  } finally {
-    DB.waConfig = saved;
-  }
 }
 /** Carte de rappel dans Réglages. */
 function waSettingsCardHtml(){
   if (!['fondateur','admin','comptable'].includes((currentUser()||{}).role)) return '';
   const c = waCfg();
-  return `<div class="card" style="margin-bottom:16px;border-left:4px solid ${waAuto()?'#16a34a':'#f59e0b'}">
-    <b>📲 Rappels WhatsApp automatiques</b>
-    <div style="font-size:12px;color:var(--muted);margin:4px 0 10px">${waAuto()?'Actifs — rappels les '+c.days.join(', ')+' du mois, confirmations de paiement '+(c.confirmPayment?'activées':'désactivées')+'.':'Inactifs — configurez la passerelle WhatsApp du markaz.'}</div>
+  return `<div class="card" style="margin-bottom:16px;border-left:4px solid ${c.enabled?'#16a34a':'#f59e0b'}">
+    <b>📲 Rappels WhatsApp</b>
+    <div style="font-size:12px;color:var(--muted);margin:4px 0 10px">${c.enabled?'Activés — rappels proposés les '+c.days.join(', ')+' du mois, envoyés depuis le WhatsApp du markaz, un parent après l’autre.':'Désactivés.'}</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
-      ${isAdminOrAbove()?`<button class="fb fb-gold fb-sm" onclick="openWaConfig()">⚙️ Configurer</button>`:''}
+      ${isAdminOrAbove()?`<button class="fb fb-gold fb-sm" onclick="openWaConfig()">⚙️ Réglages</button>`:''}
       <button class="fb fb-ghost fb-sm" onclick="navigate('whatsapp')">📋 Ouvrir les rappels</button>
     </div></div>`;
 }
@@ -9961,8 +9584,8 @@ function openStudentLedger(studentId){
       <button class="fb fb-ghost" onclick="closeModal()">Fermer</button>
     </div>`);
 }
-/** Relance individuelle d'un parent endetté (passerelle si active, sinon WhatsApp direct). */
-async function waDebtReminderOne(studentId){
+/** Relance individuelle d'un parent endetté : WhatsApp s'ouvre avec le message rédigé. */
+function waDebtReminderOne(studentId){
   const s = DB.students.find(x=>x.id===studentId); if (!s) return;
   const phone = waNormPhone(s.guardian_phone);
   if (!phone){ toast('Aucun numéro de tuteur pour cet élève.'); return; }
@@ -9970,16 +9593,8 @@ async function waDebtReminderOne(studentId){
   const sit = nDebtSituation(s, target + '-99');
   const g = { phone, parent: s.guardian_name||'', lines: [{ s, arrears: sit.arrears, arrearsAmount: sit.totalDue, target, dueT: 0 }] };
   const text = waReminderText(g, sit.totalDue, true);
-  if (waAuto()){
-    toast('Envoi en cours…');
-    const key = waDayKey() + '_one_' + s.id + '_' + Date.now().toString(36);
-    const meta = { t:'dette', n: s.first_name+' '+s.last_name, m: sit.totalDue };
-    const r = await waDeliver(key, phone, text, meta);
-    if (r === 'fail'){ waFallbackModal(phone, text, (waLogGet(key)||{}).e, key, meta); return; }
-    toast(r==='ok' ? '✅ Rappel envoyé au parent.' : 'ℹ️ Ce numéro n’a pas WhatsApp.');
-  } else {
-    window.open(waLink(phone, text), '_blank');
-  }
+  window.open(waLink(phone, text), '_blank');
+  waLogSet(waDayKey() + '_one_' + s.id, { t:'dette', p: phone, s:'manual', e:'', n: s.first_name+' '+s.last_name, m: sit.totalDue });
 }
 
 /* ---- Moteur d'impression multi-pages (même charte que printA4) ---- */
@@ -10462,7 +10077,7 @@ function savePayMode(){
 
 
 /* =====================================================================
-   ENVOI GUIDÉ DES RAPPELS (mode assisté, ou secours si la passerelle échoue)
+   ENVOI GUIDÉ DES RAPPELS — depuis le WhatsApp du markaz, parent par parent
    Un navigateur n'autorise l'ouverture de WhatsApp que sur un geste de
    l'utilisateur : l'appli prépare chaque message et l'opérateur n'a qu'à
    toucher « Envoyer » pour chaque parent, à la suite (débiteurs en premier).
@@ -10528,7 +10143,7 @@ function waPromptPending(now, failedOnly, force){
     const tot = items.reduce((a,i)=>a+i.total,0);
     const b = document.createElement('div'); b.id = 'waRemindBanner';
     b.style.cssText = 'position:fixed;left:50%;bottom:70px;transform:translateX(-50%);z-index:9997;background:#fff;color:#14261b;border:2px solid '+(debt?'#dc2626':'#16a34a')+';border-radius:12px;padding:12px 14px;box-shadow:0 10px 28px rgba(0,0,0,.3);max-width:92vw;width:390px;font-size:13px';
-    b.innerHTML = `<b>🔔 ${failedOnly?'Rappels non partis par la passerelle':'Rappels de paiement du jour'}</b>
+    b.innerHTML = `<b>🔔 Rappels de paiement du jour</b>
       <div style="margin:4px 0 10px;color:#5f7268">${items.length} parent(s) à prévenir${debt?` dont <b style="color:#b91c1c">${debt} avec des dettes</b>`:''} — ${fmtGNF(tot)} au total.</div>
       <div style="display:flex;gap:8px"><button class="fb fb-green fb-sm" style="flex:1" onclick="waStartGuided(${failedOnly?'true':'false'})">📲 Envoyer maintenant</button>
       <button class="fb fb-ghost fb-sm" onclick="document.getElementById('waRemindBanner').remove()">Plus tard</button></div>`;
