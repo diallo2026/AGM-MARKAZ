@@ -1548,7 +1548,7 @@ function pageHead(title, sub, actionsHtml){
    après un déploiement, c'est que l'ancienne version est encore en
    cache sur l'appareil.
    ===================================================================== */
-const AGM_VERSION = '2026.10.09-1';
+const AGM_VERSION = '2026.10.09-2';
 
 /** Supprime tout le cache local de l'appli et recharge la dernière version. */
 async function forcerMiseAJour(){
@@ -5986,9 +5986,10 @@ function printArchives(){
   ensureExt();
   const list = DB.archives.filter(a=>!a.restored_at);
   printA4('Registre des archives',
-    a4Table(['N°','Élève','Matricule','Catégorie','Tuteur','Archivé le','Sortie / motif'],
+    a4Table(['N°','Photo','Élève','Matricule','Catégorie','Tuteur','Archivé le','Sortie / motif'],
       list.map((a,i)=>{ const s=a.snapshot||{};
-        return [i+1, esc((s.first_name||'')+' '+(s.last_name||'')), esc(s.matricule||''),
+        const ph=((DB.students.find(x=>x.id===a.student_id)||{}).photo)||s.photo||'';
+        return [i+1, ph?`<img src="${esc(ph)}" style="width:38px;height:38px;object-fit:cover;border-radius:7px">`:'—', esc((s.first_name||'')+' '+(s.last_name||'')), esc(s.matricule||''),
           s.category==='internat'?'Internat':'Externat', esc(s.guardian_name||'—'),
           new Date(a.archived_at).toLocaleDateString('fr-FR'),
           (a.exit_date||s.exit_date) ? 'Quitté le '+oFr(a.exit_date||s.exit_date)+((a.exit_reason||s.exit_reason)?' — '+esc(a.exit_reason||s.exit_reason):'') : '—']; })),
@@ -10462,12 +10463,15 @@ renderArchives = function(){
     const exit = a.exit_date || (live && live.exit_date) || s.exit_date || '';
     const reason = a.exit_reason || (live && live.exit_reason) || s.exit_reason || '';
     const hasAuth = !!DB.studentAuth[a.student_id];
+    const photo = (live && live.photo) || s.photo || '';
     let rest = 0;
     if (exit && live && paymentStatusOf(live)==='payant'){ try { rest = studentDebtLedger(live.id).reduce((t,m)=>t+m.balance,0); } catch(e){} }
     return `<div class="card" style="margin-bottom:10px;padding:12px 14px;border-left:4px solid ${exit?'#dc2626':'#64748b'}">
       <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
-        <div style="min-width:0"><b>${esc((s.first_name||'')+' '+(s.last_name||''))}</b>
-          <div style="font-size:11.5px;color:var(--muted);font-family:'DM Mono',monospace">${esc(s.matricule||'')}</div></div>
+        <div style="display:flex;align-items:center;gap:10px;min-width:0">${photo?`<img src="${esc(photo)}" alt="" style="width:58px;height:58px;border-radius:14px;object-fit:cover;flex:0 0 auto;border:1px solid var(--line);cursor:pointer" onclick="oArchivePhoto('${a.id}')">`:photoThumb({}, 58)}
+          <div style="min-width:0"><b>${esc((s.first_name||'')+' '+(s.last_name||''))}</b>
+          <div style="font-size:11.5px;color:var(--muted);font-family:'DM Mono',monospace">${esc(s.matricule||'')}</div>
+          <div style="font-size:11.5px;color:var(--muted)">${s.category==='internat'?'Internat':'Externat'}${s.guardian_name?' · '+esc(s.guardian_name):''}</div></div></div>
         <div style="text-align:right">${exit?`<span class="badge badge-red">🚪 Quitté le ${esc(oFr(exit))}</span>`:'<span class="badge badge-slate">🗄️ Archivé</span>'}
           <div style="font-size:11.5px;color:var(--muted);margin-top:3px">Archivé le ${new Date(a.archived_at).toLocaleDateString('fr-FR')}</div></div>
       </div>
@@ -10483,6 +10487,16 @@ renderArchives = function(){
     ${pageHead('Archives', 'Élèves désactivés — réservé au fondateur', printBtn('printArchives()'))}
     ${cards || `<div class="table-wrap"><div class="empty-state"><div class="em">🗄️</div>Aucun élève archivé.</div></div>`}`;
 };
+
+/** Photo de l'élève archivé en grand (toucher la vignette). */
+function oArchivePhoto(archiveId){
+  const a = DB.archives.find(x=>x.id===archiveId); if (!a) return;
+  const s = a.snapshot || {}; const live = DB.students.find(x=>x.id===a.student_id);
+  const photo = (live && live.photo) || s.photo; if (!photo) return;
+  openModal(`<h3 style="margin:0 0 10px">${esc((s.first_name||'')+' '+(s.last_name||''))} <span class="badge badge-slate" style="margin-left:6px">${esc(s.matricule||'')}</span></h3>
+    <img src="${esc(photo)}" alt="" style="width:100%;max-height:60vh;object-fit:contain;border-radius:12px;background:var(--panel2)">
+    <button class="fb fb-ghost" style="width:100%;margin-top:12px" onclick="closeModal()">Fermer</button>`);
+}
 
 /* ---- Formulaires élève : date d'arrivée au markaz (internes) ---- */
 function oInjectArrival(prefix, value){
