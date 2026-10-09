@@ -1548,7 +1548,7 @@ function pageHead(title, sub, actionsHtml){
    après un déploiement, c'est que l'ancienne version est encore en
    cache sur l'appareil.
    ===================================================================== */
-const AGM_VERSION = '2026.10.08-3';
+const AGM_VERSION = '2026.10.09-1';
 
 /** Supprime tout le cache local de l'appli et recharge la dernière version. */
 async function forcerMiseAJour(){
@@ -1856,7 +1856,7 @@ function studentRowHtml(s){
   const tUser = teacher ? DB.users.find(u=>u.id===teacher.user_id) : null;
   return `<tr>
     <td style="font-family:'DM Mono',monospace;color:var(--gold-light)">${esc(s.matricule)}</td>
-    <td><div style="display:flex;align-items:center;gap:9px">${photoThumb(s,34)}<span>${esc(s.first_name+' '+s.last_name)}</span></div></td>
+    <td><div style="display:flex;align-items:center;gap:9px">${photoThumb(s,34)}<div style="min-width:0"><span>${esc(s.first_name+' '+s.last_name)}</span>${stRowStatusHtml(s)}</div></div></td>
     <td>${categoryLabel(s.category)}</td>
     <td>${tUser ? esc(tUser.first_name+' '+tUser.last_name) : '<span style="color:var(--muted)">—</span>'}</td>
     <td>${(s.memorized_juz||[]).length} / 30</td>
@@ -1909,7 +1909,7 @@ function renderStudents(){
 function studentPositionLabel(s){
   ensureExt();
   const p = getPlanning(s.id);
-  if (p.level==='hourouf') return 'Hourouf — lettre ' + ((p.hourouf_index||0)+1) + '/' + HOUROUF.length;
+  if (p.level==='hourouf') return rbTxt(p,'position');
   const sIdx = clampSourate(p.sourate);
   return 'Djouzou ' + (s.current_juz||p.juz||1) + ' — ' + SOURATES[sIdx-1][0] + ' v.' + (p.ayah||1);
 }
@@ -2123,6 +2123,7 @@ function viewStudent(id){
       <div><div class="fl">Tuteur</div>${esc(s.guardian_name||'—')}</div>
       <div><div class="fl">Téléphone</div>${esc(s.guardian_phone||'—')}</div>
       <div><div class="fl">Inscrit le</div>${s.enrollment_date||'—'}</div>
+      ${stViewFieldsHtml(s)}
       <div><div class="fl">Djouzou mémorisés</div>${memorized.length} / 30</div>
       <div><div class="fl">Statut de paiement</div>${paymentStatusBadgeStudent(s)}</div>
       <div><div class="fl">Position actuelle (limite)</div>${esc(studentPositionLabel(s))}</div>
@@ -2136,6 +2137,7 @@ function viewStudent(id){
 
     <div style="display:flex;gap:8px;margin-top:18px">
       <button class="fb fb-ghost" style="flex:1" onclick="closeModal()">Fermer</button>
+      ${stCanStatus()?`<button class="fb fb-gold" onclick="openStudentStatus('${s.id}')">🔄 Statut</button>`:''}
       <button class="fb fb-danger" onclick="archiveStudent('${s.id}');closeModal()">🗄️ Archiver</button>
     </div>`);
 }
@@ -5196,10 +5198,10 @@ function renderPlanning(){
     const t = DB.teachers.find(x=>x.id===s.teacher_id);
     const tu = t ? DB.users.find(u=>u.id===t.user_id) : null;
     const lvl = p.level==='hourouf'
-      ? `<span class="badge badge-gold">🔤 Hourouf (${HOUROUF[p.hourouf_index]||'—'})</span>`
+      ? `<span class="badge badge-gold">${esc(rbTxt(p,'badge'))}</span>`
       : `<span class="badge badge-green">📖 Coran — Djouzou ${p.juz}</span>`;
     const prog = p.level==='hourouf'
-      ? `Lettre ${p.hourouf_index+1}/${HOUROUF.length}`
+      ? rbTxt(p,'prog')
       : rangeLabel(lessonRange(p));
     return `<tr>
       <td><div style="display:flex;align-items:center;gap:9px">${photoThumb(s,34)}<span>${esc(s.first_name+' '+s.last_name)}</span></div></td>
@@ -5318,12 +5320,12 @@ function renderLecture(){
     const rangeOld = getDailyRange(s.id,'old');
     const port = (p.level!=='hourouf' && !rangeNew) ? portionInSourate(p.sourate, p.ayah, quota) : null;
     const nouvelle = p.level==='hourouf'
-      ? `Lettre ${HOUROUF[p.hourouf_index]||'—'} (${p.hourouf_index+1}/${HOUROUF.length})`
+      ? esc(rbTxt(p,'new'))
       : rangeNew
         ? `${SOURATES[rangeNew.sourate-1][0]} ${rangeNew.from}${rangeNew.to>rangeNew.from?'-'+rangeNew.to:''}`
         : portionLabel(port) + (port.clamped?' <span class="badge badge-gold" style="font-size:9.5px">fin de sourate</span>':'');
     const ancienne = p.level==='hourouf'
-      ? (p.hourouf_index>0 ? `Lettres 1 → ${p.hourouf_index}` : '—')
+      ? rbTxt(p,'old')
       : rangeOld
         ? `${SOURATES[rangeOld.sourate-1][0]} ${rangeOld.from}${rangeOld.to>rangeOld.from?'-'+rangeOld.to:''}`
         : (p.rev_ayah_from && p.rev_ayah_to)
@@ -5437,7 +5439,7 @@ function markMastery(studentId, mastered){
   const from    = p.level==='hourouf' ? null      : (rangeNew ? rangeNew.from   : port.from);
   const to      = p.level==='hourouf' ? null      : (rangeNew ? rangeNew.to     : port.to);
   const label = p.level==='hourouf'
-    ? `Lettre ${HOUROUF[p.hourouf_index]||''} (${p.hourouf_index+1})`
+    ? rbTxt(p,'lesson')
     : `${SOURATES[sourate-1][0]} ${from}${to>from?'-'+to:''}`;
 
   DB.masteryLog.push({ id:uid('ml'), student_id:studentId, date:todayStr(), label, level:p.level, mastered:!!mastered });
@@ -5451,12 +5453,12 @@ function markMastery(studentId, mastered){
 
   const exist = DB.lessons.find(l=>l.student_id===studentId && l.status==='pending');
   if (exist){ toast('Une leçon est déjà en attente de restitution.'); return; }
-  DB.lessons.push({ id:uid('ls'), student_id:studentId, date:todayStr(), level:p.level,
+  DB.lessons.push(Object.assign({ id:uid('ls'), student_id:studentId, date:todayStr(), level:p.level,
     label, sourate:p.level==='hourouf'?p.sourate:sourate,
     ayah:p.level==='hourouf'?p.ayah:(sourateOrderUp()?to:from),
     count:p.level==='hourouf'?quota:(to-from+1),
     hourouf_index:p.hourouf_index, juz:p.juz, status:'pending',
-    teacher_id:(myTeacher()||{}).id||null });
+    teacher_id:(myTeacher()||{}).id||null }, rbLessonExtra(p)));
   clearDailyRange(studentId,'new');
   saveDB(); toast('✅ Maîtrisé : '+label+' — envoyé en restitution.');
   renderLecture();
@@ -5475,7 +5477,7 @@ function markAbsent(studentId){
 function renderRestitution(){
   ensureExt();
   const me = myTeacher();
-  const pend = DB.lessons.filter(l=>l.status==='pending')
+  const pend = DB.lessons.filter(l=>l.status==='pending' && !l.weekly)
     .filter(l=>!me || l.teacher_id===me.id || !l.teacher_id);
   const rows = pend.map(l=>{
     const s = DB.students.find(x=>x.id===l.student_id)||{};
@@ -5503,11 +5505,12 @@ function renderRestitution(){
     ${pageHead('Restitution', 'Toute portion enseignée doit être restituée avant de passer à la suivante',
       printBtn('printRestitution()','Imprimer'))}
     ${filterBar('renderRestitution()')}
-    <div class="card" style="margin-bottom:16px"><b>En attente de restitution (${pend.length})</b></div>
+    ${rwSectionHtml(me)}
+    ${(rwOn() && !pend.length) ? '' : `<div class="card" style="margin-bottom:16px"><b>En attente de restitution (${pend.length})</b></div>
     <div class="table-wrap">
       ${rows?`<table><thead><tr><th>Élève</th><th>Portion enseignée</th><th>Date</th><th>Niveau</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       :`<div class="empty-state"><div class="em">🎙️</div>Aucune restitution en attente.</div>`}
-    </div>
+    </div>`}
     ${restitutionRollupHtml(me)}
     <div class="card" style="margin-top:16px"><b>Historique des restitutions</b></div>
     <div class="table-wrap">
@@ -5582,8 +5585,7 @@ function validateRecitation(lessonId, ok){
 
   if (ok){
     if (p.level==='hourouf'){
-      if (p.hourouf_index < HOUROUF.length-1) p.hourouf_index++;
-      else { p.level='coran'; toast('Alphabet terminé : passage au Coran.'); }
+      if (!rbAdvance(p)) { p.level='coran'; toast(rbDoneMsg(p)); }
     } else {
       // Avancer en restant dans la sourate ; si elle est terminée, passer à la suivante
       // selon le sens configuré (haut->bas ou bas->haut).
@@ -5684,7 +5686,7 @@ function printTeacherGroup(teacherId){
         return [i+1, esc(s.first_name+' '+s.last_name), esc(s.matricule),
           s.category==='internat'?'Internat':'Externat',
           p.level==='hourouf'?'Hourouf':'Djouzou '+p.juz,
-          p.level==='hourouf'?('Lettre '+(p.hourouf_index+1)):rangeLabel(lessonRange(p))]; })),
+          p.level==='hourouf'?rbTxt(p,'p1'):rangeLabel(lessonRange(p))]; })),
     { subtitle:esc(u.first_name+' '+u.last_name)+' — '+mine.length+' élève(s)',
       sgLeft:"L'enseignant", sgRight:'La direction' });
 }
@@ -5698,7 +5700,7 @@ function printPlanningList(){
         const t=DB.teachers.find(x=>x.id===s.teacher_id); const tu=t?DB.users.find(u=>u.id===t.user_id):null;
         return [i+1, esc(s.first_name+' '+s.last_name), esc(s.matricule),
           p.level==='hourouf'?'Hourouf':'Coran — Djouzou '+p.juz,
-          p.level==='hourouf'?('Lettre '+(p.hourouf_index+1)+'/'+HOUROUF.length):rangeLabel(lessonRange(p)),
+          p.level==='hourouf'?rbTxt(p,'p2'):rangeLabel(lessonRange(p)),
           p.level==='hourouf'?'—':(p.versets_per_day+' v./jour'),
           p.level==='hourouf'?'—':(p.revision_per_day+' v./jour'),
           tu?esc(tu.first_name+' '+tu.last_name):'—']; })),
@@ -5712,7 +5714,7 @@ function printPlanning(studentId){
       ['Élève', `<b>${esc(s.first_name+' '+s.last_name)}</b>`],
       ['Matricule', esc(s.matricule)],
       ['Niveau', p.level==='hourouf'?'Hourouf (alphabet arabe)':'Coran'],
-      ['Position actuelle', p.level==='hourouf'?('Lettre '+HOUROUF[p.hourouf_index]+' — '+(p.hourouf_index+1)+'/'+HOUROUF.length):rangeLabel(lessonRange(p))],
+      ['Position actuelle', p.level==='hourouf'?rbTxt(p,'p3'):rangeLabel(lessonRange(p))],
       ['Djouzou en cours', p.level==='hourouf'?'—':String(p.juz)],
       ['Nouvelle leçon', p.level==='hourouf'?'1 lettre/jour':(p.versets_per_day+' verset(s) par jour')],
       ['Ancienne leçon (révision)', p.level==='hourouf'?'Lettres acquises':
@@ -5722,7 +5724,7 @@ function printPlanning(studentId){
     + `<div class="sec">Dernières restitutions</div>`
     + a4Table(['Date','Portion','Résultat'], recs.map(r=>[r.date, esc(r.label), r.ok?'Validée':'Reprise'])),
     { subtitle:esc(s.first_name+' '+s.last_name),
-      shareText:`Programme de ${s.first_name} ${s.last_name}\nNiveau : ${p.level==='hourouf'?'Hourouf':'Coran — Djouzou '+p.juz}\nLeçon : ${p.level==='hourouf'?'Lettre '+(p.hourouf_index+1):rangeLabel(lessonRange(p))}`,
+      shareText:`Programme de ${s.first_name} ${s.last_name}\nNiveau : ${p.level==='hourouf'?'Hourouf':'Coran — Djouzou '+p.juz}\nLeçon : ${p.level==='hourouf'?rbTxt(p,'p1'):rangeLabel(lessonRange(p))}`,
       phone:s.guardian_phone, image:true });
 }
 function printLectureList(){
@@ -5732,7 +5734,7 @@ function printLectureList(){
     a4Table(['N°','Élève','Matricule','Nouvelle leçon','Ancienne leçon','Signature'],
       students.map((s,i)=>{ const p=getPlanning(s.id);
         return [i+1, esc(s.first_name+' '+s.last_name), esc(s.matricule),
-          p.level==='hourouf'?('Lettre '+HOUROUF[p.hourouf_index]):rangeLabel(lessonRange(p)),
+          p.level==='hourouf'?rbTxt(p,'p4'):rangeLabel(lessonRange(p)),
           p.level==='hourouf'?'Lettres acquises':(p.revision_per_day+' v.'), '']; })),
     { subtitle:'Journée du '+todayStr(), sgLeft:"L'enseignant", sgRight:'La direction' });
 }
@@ -5856,7 +5858,7 @@ function progressStats(studentId){
     noMemo: jours,
     absences: att.length,
     causes: att.map(a=>a.date+' : '+(a.cause||'Non précisée')),
-    position: p.level==='hourouf' ? ('Lettre '+HOUROUF[p.hourouf_index]) : rangeLabel(lessonRange(p)),
+    position: p.level==='hourouf' ? rbTxt(p,'p4') : rangeLabel(lessonRange(p)),
     juzDone: (DB.students.find(x=>x.id===studentId)||{}).memorized_juz||[],
     mastered: mastery.filter(m=>m.mastered).length,
     notMastered: mastery.filter(m=>!m.mastered).length,
@@ -5943,11 +5945,7 @@ function nonFinBody(){
   let rank=0,last=null;
   return a4Kpis([{l:'Élèves actifs',v:students.length},{l:'Enseignants',v:DB.teachers.length},
                  {l:'Moyenne générale',v:moy.toFixed(2)+'/20'},{l:'Absences',v:abs.length}])
-    + `<div class="sec">Classement par ordre de mérite</div>`
-    + a4Table(['Rang','Élève','Matricule','Moyenne','Mention'],
-        ranked.map((r,i)=>{ if(r.ev.average!==last){rank=i+1;last=r.ev.average;}
-          return [`<b>${rank}</b>`, esc(r.s.first_name+' '+r.s.last_name), esc(r.s.matricule),
-            r.ev.average.toFixed(2)+'/20', esc(r.ev.mention||'')]; }))
+    + evMeritA4(ranked)
     + `<div class="sec">Suivi de la mémorisation</div>`
     + a4Table(['Élève','Niveau','Validées','Reprises','Absences','Djouzou'],
         students.map(s=>{ const st=progressStats(s.id);
@@ -5988,11 +5986,12 @@ function printArchives(){
   ensureExt();
   const list = DB.archives.filter(a=>!a.restored_at);
   printA4('Registre des archives',
-    a4Table(['N°','Élève','Matricule','Catégorie','Tuteur','Archivé le'],
+    a4Table(['N°','Élève','Matricule','Catégorie','Tuteur','Archivé le','Sortie / motif'],
       list.map((a,i)=>{ const s=a.snapshot||{};
         return [i+1, esc((s.first_name||'')+' '+(s.last_name||'')), esc(s.matricule||''),
           s.category==='internat'?'Internat':'Externat', esc(s.guardian_name||'—'),
-          new Date(a.archived_at).toLocaleDateString('fr-FR')]; })),
+          new Date(a.archived_at).toLocaleDateString('fr-FR'),
+          (a.exit_date||s.exit_date) ? 'Quitté le '+oFr(a.exit_date||s.exit_date)+((a.exit_reason||s.exit_reason)?' — '+esc(a.exit_reason||s.exit_reason):'') : '—']; })),
     { subtitle:list.length+' élève(s) archivé(s)', sgLeft:'Le secrétariat', sgRight:'Le fondateur' });
 }
 
@@ -6408,6 +6407,7 @@ async function openReadingImage(studentId, type){
 
   /* ---- Niveau Hourouf : planche de lettres, sans réseau ---- */
   if (p.level==='hourouf'){
+    if (!rbIsAlpha(p)){ rbOpenSheet(s, p, type==='old'?'old':'new'); return; }
     const isNew = (type!=='old');
     const letters = isNew ? [HOUROUF[p.hourouf_index]||'ا']
                           : HOUROUF.slice(0, Math.max(0,p.hourouf_index));
@@ -8061,6 +8061,7 @@ function renderSettings(){
 
     ${ficheSettingsCardHtml()}
     ${payModeCardHtml()}
+    ${oFounderCardHtml()}
     ${waSettingsCardHtml()}
     ${calendarReviewHtml()}
     ${langBlockHtml()}
@@ -9161,6 +9162,7 @@ function waBuildReminderQueue(ref){
   nPayingStudents().forEach(s=>{
     const fee = Number(s.monthly_fee)||0;
     if (fee <= 0) return;
+    if (stIsInactive(s)) return;                 // élève inactif : calculs et rappels suspendus
     if (s.enrollment_date && String(s.enrollment_date).slice(0,7) > target) return;
     const sit = nDebtSituation(s, target);
     const paidT = nPaidByMonth(s.id)[target] || 0;
@@ -9274,7 +9276,8 @@ function waTick(){
     if (!SESSION || !DB || typeof currentUser !== 'function') return;
     const u = currentUser(); if (!u || !['fondateur','admin','comptable'].includes(u.role)) return;
     const c = waCfg();
-    if (!c.enabled || !c.promptAssisted || WA_SEQ) return;
+    if (!c.enabled || WA_SEQ) return;
+    if (!c.promptAssisted && !wgAutoWanted()) return;
     const now = new Date();
     const hm = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0');
     if (c.days.includes(now.getDate()) && hm >= c.hour) waPromptPending(now, false);
@@ -9329,9 +9332,9 @@ function renderWhatsApp(){
       <div style="font-size:12.5px;color:var(--muted)">Jours de rappel : <b>${c.days.join(', ')}</b> du mois, à partir de <b>${esc(c.hour)}</b>${isDay?' — <b style="color:var(--brand)">aujourd’hui est un jour de rappel</b>':''}</div>
       <div style="font-size:12.5px;color:var(--muted)">Confirmation de paiement : <b>${c.confirmPayment?('proposée '+c.confirmDelay+' s après '+(c.confirmTrigger==='recorded'?'l’enregistrement':'la validation')):'non'}</b></div>
       <div style="font-size:12px;margin-top:8px;background:var(--panel2);border-radius:8px;padding:8px 10px">
-        Les messages partent de <b>votre WhatsApp</b> : chaque message est déjà rédigé, vous n'avez qu'à appuyer sur ➤ dans WhatsApp, puis le parent suivant s'affiche.</div>
+        <span id="waModeTxt">Les messages partent de <b>votre WhatsApp</b> : chaque message est déjà rédigé, vous n'avez qu'à appuyer sur ➤ dans WhatsApp, puis le parent suivant s'affiche.</span></div>
       <button class="fb fb-green" style="width:100%;margin-top:12px;padding:14px;font-size:15px" onclick="waStartGuided()" ${pending.length?'':'disabled'}>
-        📲 Envoyer les rappels du jour à tous les parents (${pending.length})</button>
+        <span id="waMainBtnTxt">📲 Envoyer les rappels du jour à tous les parents</span> (${pending.length})</button>
     </div>
 
     <div class="kpi-grid">
@@ -9475,8 +9478,10 @@ function waSettingsCardHtml(){
   return `<div class="card" style="margin-bottom:16px;border-left:4px solid ${c.enabled?'#16a34a':'#f59e0b'}">
     <b>📲 Rappels WhatsApp</b>
     <div style="font-size:12px;color:var(--muted);margin:4px 0 10px">${c.enabled?'Activés — rappels proposés les '+c.days.join(', ')+' du mois, envoyés depuis le WhatsApp du markaz, un parent après l’autre.':'Désactivés.'}</div>
+    ${wgSettingsLine()}
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       ${isAdminOrAbove()?`<button class="fb fb-gold fb-sm" onclick="openWaConfig()">⚙️ Réglages</button>`:''}
+      ${isAdminOrAbove()?`<button class="fb fb-green fb-sm" onclick="wgOpenConnect()">🔗 Numéro du markaz</button>`:''}
       <button class="fb fb-ghost fb-sm" onclick="navigate('whatsapp')">📋 Ouvrir les rappels</button>
     </div></div>`;
 }
@@ -9537,7 +9542,7 @@ function renderDettesList(){
     const s = r.s;
     return `<div style="border:1px solid var(--line);border-left:4px solid ${r.totalDue>0?'#dc2626':'#16a34a'};border-radius:10px;padding:10px 12px;margin-bottom:8px;background:var(--panel)">
       <div style="display:flex;justify-content:space-between;gap:8px">
-        <div style="min-width:0"><b>${esc(s.first_name+' '+s.last_name)}</b>
+        <div style="min-width:0"><b>${esc(s.first_name+' '+s.last_name)}</b>${stInactTag(s)}
           <div style="font-size:11.5px;color:var(--muted)">${esc(s.matricule||'')} · ${s.category==='internat'?'Internat':'Externat'}${s.guardian_name?' · '+esc(s.guardian_name):''}${s.guardian_phone?' · '+esc(s.guardian_phone):''}</div></div>
         <div style="text-align:right;white-space:nowrap"><div style="font-weight:800;color:${r.totalDue>0?'#b91c1c':'#15803d'}">${fmtGNF(r.totalDue)}</div>
           <div style="font-size:11px;color:var(--muted)">${r.unpaid.length} mois en retard</div></div>
@@ -9559,11 +9564,12 @@ function openStudentLedger(studentId){
     : st==='partiel' ? '<span class="badge badge-amber">Partiel</span>'
     : st==='impayé' ? '<span class="badge badge-red">Impayé</span>'
     : st==='en cours' ? '<span class="badge badge-slate">En cours — payable en fin de mois</span>'
+    : st==='inactif' ? '<span class="badge badge-slate">⏸️ Inactif — non dû</span>'
     : '<span class="badge badge-slate">—</span>';
   const rows = ledger.slice().reverse().map(mo=>`
     <div style="border:1px solid var(--line);border-radius:9px;padding:9px 11px;margin-bottom:6px;background:var(--panel)">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-        <b style="font-size:13px">${esc(mo.label)}</b>${badge(mo.status)}
+        <b style="font-size:13px">${esc(mo.label)}${mo.period?`<span style="display:block;font-size:11px;font-weight:400;color:var(--muted)">${esc(mo.period)}</span>`:''}</b>${badge(mo.status)}
       </div>
       <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--muted);margin-top:4px;flex-wrap:wrap">
         <span>Dû : <b>${fmtGNF(mo.due)}</b></span><span>Payé : <b>${fmtGNF(mo.paid)}</b></span>${mo.balance>0?`<span style="color:#b91c1c">Reste : <b>${fmtGNF(mo.balance)}</b></span>`:''}
@@ -9636,7 +9642,7 @@ function bilanDettePage(s){
   const rest = ledger.reduce((a,m)=>a+m.balance,0);
   const unpaid = ledger.filter(m=>m.balance>0);
   const stCls = st => st==='payé'?'st-ok':(st==='partiel'?'st-pa':(st==='en cours'?'':'st-ko'));
-  const stLbl = st => st==='payé'?'✔ Payé':(st==='partiel'?'◐ Partiel':(st==='impayé'?'✖ Impayé':(st==='en cours'?'En cours (fin de mois)':'—')));
+  const stLbl = st => st==='payé'?'✔ Payé':(st==='partiel'?'◐ Partiel':(st==='impayé'?'✖ Impayé':(st==='en cours'?'En cours (fin de mois)':(st==='inactif'?'⏸ Inactif (non dû)':'—'))));
   const pays = (DB.payments||[]).filter(p=>p.student_id===s.id && p.status!=='rejected' && p.label==='Frais de scolarité')
     .sort((a,b)=>(a.date||'').localeCompare(b.date||''));
   const body = `
@@ -9651,7 +9657,7 @@ function bilanDettePage(s){
               {l:'Total payé',v:fmtGNF(paid)},{l:'Reste à payer',v:`<span style="color:#b91c1c">${fmtGNF(rest)}</span>`}])}
     <div class="sec">Situation mois par mois</div>
     ${a4Table(['Mois','Montant dû','Montant payé','Reste','Statut'],
-      ledger.map(m=>[esc(m.label), fmtGNF(m.due), fmtGNF(m.paid), m.balance>0?`<b style="color:#b91c1c">${fmtGNF(m.balance)}</b>`:'—', `<span class="${stCls(m.status)}">${stLbl(m.status)}</span>`]),
+      ledger.map(m=>[esc(m.label)+(m.period?'<br><small>'+esc(m.period)+'</small>':''), fmtGNF(m.due), fmtGNF(m.paid), m.balance>0?`<b style="color:#b91c1c">${fmtGNF(m.balance)}</b>`:'—', `<span class="${stCls(m.status)}">${stLbl(m.status)}</span>`]),
       ['<b>TOTAL</b>', `<b>${fmtGNF(due)}</b>`, `<b>${fmtGNF(paid)}</b>`, `<b style="color:#b91c1c">${fmtGNF(rest)}</b>`, ''])}
     ${pays.length?`<div class="sec">Versements enregistrés (scolarité)</div>
     ${a4Table(['Date','N° reçu','Mois couverts','Statut','Montant'],
@@ -9807,8 +9813,8 @@ function openCarteEleve(studentId){
   const canPay = ['fondateur','admin','comptable'].includes((currentUser()||{}).role) && paymentStatusOf(s)==='payant';
   const tiles = Array.from({length:12},(_,i)=>{
     const ym = ymOf(CARTE.year, i+1); const st = carteMonthState(s, ym, pm);
-    const lbl = { paye:'✔ Payé', partiel:'◐ Partiel', impaye:'✖ Impayé', avenir:'À venir', avant:'—' }[st.st];
-    const click = canPay && st.st!=='paye' && st.st!=='avant';
+    const lbl = { paye:'✔ Payé', partiel:'◐ Partiel', impaye:'✖ Impayé', avenir:'À venir', avant:'—', inactif:'⏸ Inactif' }[st.st];
+    const click = canPay && st.st!=='paye' && st.st!=='avant' && st.st!=='inactif';
     return `<div ${click?`onclick="closeModal();openPaymentForm('${s.id}','${ym}',${st.balance||Number(s.monthly_fee)||0})"`:''}
       style="border:2px solid ${CARTE_COL[st.st]};border-radius:10px;padding:8px 6px;text-align:center;${click?'cursor:pointer;':''}background:${st.st==='paye'?'rgba(22,163,74,.1)':st.st==='impaye'?'rgba(220,38,38,.06)':'var(--panel)'}">
       <div style="font-weight:800;font-size:12.5px">${esc(monthLabel(i+1))}</div>
@@ -10150,6 +10156,1919 @@ function waPromptPending(now, failedOnly, force){
     document.body.appendChild(b);
     try { sessionStorage.setItem(dk, '1'); } catch(e){}
   } catch(e){}
+}
+
+/* =====================================================================
+   ███  MODULE O — RÉGLAGES DU FONDATEUR (09/10/2026)
+   1) Élèves : « Marquer quitté » (date → Archives), « Marquer inactif »
+      (calculs de mensualités et de dettes suspendus), date d'arrivée
+      des internes pour le calcul des mensualités.
+   2) Lecture : livre d'apprentissage choisi pour les élèves Hourouf.
+   3) Restitution hebdomadaire : accumulation des leçons maîtrisées.
+   4) Évaluations : critères configurables, classements Internat / Externat.
+   5) WhatsApp : envoi direct depuis le numéro connecté du markaz.
+   Extension NON destructive : uniquement des clés et des champs facultatifs
+   (debtConfig, readingBooks, restitutionConfig, evalConfig, waGateway ;
+   inactivity / exit_date / arrival_date sur l'élève), écrits seulement
+   quand le fondateur agit. Aucune donnée existante n'est modifiée.
+   ===================================================================== */
+
+/* ---- Dates (AAAA-MM-JJ) ---- */
+function oD(str){
+  const m = String(str||'').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? new Date(Number(m[1]), Number(m[2])-1, Number(m[3])) : null;
+}
+function oIso(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function oFr(str){ const d = oD(str); return d ? d.toLocaleDateString('fr-FR') : String(str||''); }
+function oDim(y, m){ return new Date(y, m, 0).getDate(); }      // m : 1..12
+function oRefresh(){
+  try {
+    if (currentPage === 'students') renderStudentsTable();
+    else navigate(currentPage);
+  } catch(e){}
+}
+
+/* =====================================================================
+   1) ÉLÈVES — INACTIF / QUITTÉ / DATE D'ARRIVÉE (INTERNAT)
+   ===================================================================== */
+/** Périodes d'inactivité : [{from, to, note}] — « to » = date du retour (vide = toujours inactif). */
+function stInact(s){
+  return nArr(s && s.inactivity).filter(x=>x && x.from)
+    .map(x=>({ from:String(x.from).slice(0,10), to:x.to ? String(x.to).slice(0,10) : '', note:String(x.note||'') }))
+    .sort((a,b)=>a.from.localeCompare(b.from));
+}
+function stCurInact(s){ const l = stInact(s); const x = l[l.length-1]; return (x && !x.to) ? x : null; }
+function stIsInactive(s){ return !!stCurInact(s); }
+function stInactMerged(s){
+  const out = [];
+  stInact(s).forEach(x=>{
+    const last = out[out.length-1];
+    if (last && (last.to === '' || x.from <= last.to)){
+      if (last.to !== '' && (x.to === '' || x.to > last.to)) last.to = x.to;
+    } else out.push({ from:x.from, to:x.to });
+  });
+  return out;
+}
+/** Vrai si l'élève est inactif pendant TOUTE la période [from, to] (bornes incluses). */
+function stInactiveWhole(s, fromStr, toStr){
+  return stInactMerged(s).some(x=> x.from <= fromStr && (x.to === '' || x.to > toStr));
+}
+function stCanStatus(){ return isAdminOrAbove() || canEditRecords(); }
+
+/* ---- Réglage du fondateur : mensualités de l'internat à partir de la date d'arrivée ---- */
+function debtCfg(){ const c = DB.debtConfig || {}; return { internatArrival: c.internatArrival === true }; }
+function oAnniv(s){ return !!(s && s.category === 'internat' && debtCfg().internatArrival); }
+function oArrivalOf(s){ return String((s && (s.arrival_date || s.enrollment_date)) || '').slice(0,10); }
+function oSaveDebtCfg(on){
+  if (!isAdminOrAbove()){ toast('Réservé au fondateur / administrateur.'); return; }
+  DB.debtConfig = Object.assign({}, DB.debtConfig || {}, { internatArrival: !!on, updatedAt: Date.now() });
+  saveDB();
+  logAction('Mensualités internat', on ? "Calcul à partir de la date d'arrivée de chaque élève" : 'Calcul habituel (mois civil)');
+  toast(on ? "✅ Internat : mensualités calculées à partir de la date d'arrivée." : '✅ Internat : calcul habituel des mensualités.');
+}
+
+/** Période de facturation « AAAA-MM » d'un élève (mois civil, ou du jour d'arrivée au jour précédent). */
+function oPeriod(s, ym){
+  const y = Number(String(ym).slice(0,4)), m = Number(String(ym).slice(5,7));
+  if (oAnniv(s)){
+    const d0 = oD(oArrivalOf(s)); const day = d0 ? d0.getDate() : 1;
+    const a = new Date(y, m-1, Math.min(day, oDim(y, m)));
+    let y2 = y, m2 = m + 1; if (m2 > 12){ m2 = 1; y2++; }
+    const b = new Date(y2, m2-1, Math.min(day, oDim(y2, m2))); b.setDate(b.getDate()-1);
+    return { from:oIso(a), to:oIso(b) };
+  }
+  return { from: ym+'-01', to: ym+'-'+String(oDim(y, m)).padStart(2,'0') };
+}
+function oLedgerCustom(s){ return !!(s && (stInact(s).length || s.exit_date || oAnniv(s))); }
+
+/** Ledger des élèves concernés par un réglage du module O (inactivité, sortie, date d'arrivée). */
+function oLedger(s){
+  const fee = Number(s.monthly_fee)||0;
+  const today = todayStr();
+  const anniv = oAnniv(s);
+  const startStr = (anniv ? oArrivalOf(s) : String(s.enrollment_date||'').slice(0,10)) || today;
+  let y = Number(startStr.slice(0,4)), m = Number(startStr.slice(5,7));
+  if (!y || !m){ const d = new Date(); y = d.getFullYear(); m = d.getMonth()+1; }
+  const paidBy = nPaidByMonth(s.id);
+  const fin = payModeCfg().mode === 'fin';
+  const exit = s.exit_date ? String(s.exit_date).slice(0,10) : '';
+  const out = []; let guard = 0;
+  while (guard < 60){
+    const ym = ymOf(y, m);
+    const per = oPeriod(s, ym);
+    if (anniv ? per.from > today : ym > nTodayYM()) break;
+    if (exit && per.from >= exit) break;                 // après la sortie : plus rien n'est dû
+    const paid = paidBy[ym] || 0;
+    const inactive = stInactiveWhole(s, per.from, per.to);
+    let due = fee, balance, status;
+    if (inactive){ due = 0; balance = 0; status = 'inactif'; }
+    else {
+      balance = Math.max(0, fee - paid);
+      status = fee <= 0 ? 'n/a' : (paid >= fee ? 'payé' : (paid > 0 ? 'partiel' : 'impayé'));
+      // Paiement en fin de mois : la période en cours n'est pas encore exigible.
+      if (fin && per.from <= today && today <= per.to && balance > 0){ balance = 0; status = 'en cours'; }
+    }
+    const row = { ym, label: monthYearLabel(ym), due, paid, balance, status };
+    if (anniv) row.period = 'du ' + oFr(per.from) + ' au ' + oFr(per.to);
+    out.push(row);
+    m++; if (m > 12){ m = 1; y++; }
+    guard++;
+  }
+  return out;
+}
+(function(){
+  if (window._agmOLedgerHooked) return; window._agmOLedgerHooked = true;
+  const _prev = studentDebtLedger;           // (déjà enrichi du mode de paiement)
+  studentDebtLedger = function(studentId){
+    const s = (DB.students||[]).find(x=>x.id===studentId);
+    if (!s || !oLedgerCustom(s)) return _prev.apply(this, arguments);   // élève non concerné : calcul d'origine
+    return oLedger(s);
+  };
+})();
+
+/* ---- Carte de paiement : mois d'inactivité ---- */
+(function(){
+  if (window._agmOCarteHooked) return; window._agmOCarteHooked = true;
+  try { CARTE_COL.inactif = '#94a3b8'; } catch(e){}
+  const _cms = carteMonthState;
+  carteMonthState = function(s, ym, paidMap){
+    const r = _cms.apply(this, arguments);
+    try {
+      if (r && r.st !== 'paye' && r.st !== 'partiel' && r.st !== 'avant' && stInact(s).length){
+        const per = oPeriod(s, ym);
+        if (stInactiveWhole(s, per.from, per.to)) return Object.assign({}, r, { st:'inactif', balance:0 });
+      }
+    } catch(e){}
+    return r;
+  };
+})();
+
+/* ---- Affichage ---- */
+function stInactTag(s){
+  const c = stCurInact(s);
+  return c ? ` <span class="badge badge-amber" title="${esc(c.note||'')}">⏸️ Inactif depuis le ${esc(oFr(c.from))}</span>` : '';
+}
+function stRowStatusHtml(s){
+  const c = stCurInact(s);
+  const can = stCanStatus();
+  if (!c && !can) return '';
+  return `<div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-top:4px">
+    ${c?`<span class="badge badge-amber" title="${esc(c.note||'')}">⏸️ Inactif depuis le ${esc(oFr(c.from))}</span>`:''}
+    ${can?`<button class="fb fb-ghost fb-sm" style="padding:3px 9px;font-size:11px" onclick="openStudentStatus('${s.id}')">🔄 Statut</button>`:''}
+  </div>`;
+}
+function stViewFieldsHtml(s){
+  const c = stCurInact(s);
+  let h = `<div><div class="fl">Présence</div>${c?`<span class="badge badge-amber">⏸️ Inactif depuis le ${esc(oFr(c.from))}</span>`:'<span class="badge badge-green">Actif</span>'}</div>`;
+  if (s.category === 'internat' && (s.arrival_date || debtCfg().internatArrival))
+    h += `<div><div class="fl">Arrivée au markaz</div>${esc(oFr(oArrivalOf(s))||'—')}</div>`;
+  return h;
+}
+
+/** Fenêtre « Statut » : inactif / réactiver / quitté (→ Archives) / archiver. Cartes pleine largeur (téléphone). */
+function openStudentStatus(id){
+  ensureExt();
+  const s = DB.students.find(x=>x.id===id); if (!s) return;
+  if (!stCanStatus()){ toast('⛔ Réservé au fondateur / administrateur.'); return; }
+  const cur = stCurInact(s), hist = stInact(s), today = todayStr();
+  const name = (s.first_name||'')+' '+(s.last_name||'');
+  const box = (c)=>`border:1px solid var(--line);border-left:4px solid ${c};border-radius:12px;padding:12px 13px;margin-bottom:10px;background:var(--panel)`;
+  const help = 'font-size:12px;color:var(--muted);margin:4px 0 10px';
+  openModal(`
+    <h3 style="margin:0 0 4px">🔄 Statut — ${esc(name)}</h3>
+    <p style="color:var(--muted);font-size:12.5px;margin:0 0 12px">Matricule ${esc(s.matricule||'')} · ${s.category==='internat'?'Internat':'Externat'} ·
+      ${cur?`<span class="badge badge-amber">⏸️ Inactif depuis le ${esc(oFr(cur.from))}</span>`:'<span class="badge badge-green">Actif</span>'}</p>
+    ${cur ? `<div style="${box('#16a34a')}">
+        <b>▶️ Marquer actif</b>
+        <div style="${help}">L'élève est inactif depuis le ${esc(oFr(cur.from))}${cur.note?' ('+esc(cur.note)+')':''}. Les mensualités reprennent à partir de sa date de retour.</div>
+        <div class="fg"><label class="fl">Date du retour</label><input class="fi" type="date" id="stReDate" value="${today}" min="${esc(cur.from)}" max="${today}"></div>
+        <button class="fb fb-green" style="width:100%" onclick="stReactivate('${s.id}')">▶️ Marquer actif</button>
+      </div>` : `<div style="${box('#f59e0b')}">
+        <b>⏸️ Marquer inactif</b>
+        <div style="${help}">L'élève reste inscrit, mais <b>aucune mensualité ni dette</b> n'est calculée pour lui à partir de cette date, jusqu'à ce qu'il soit marqué actif (les mois entièrement couverts par l'inactivité ne sont pas dus). Il ne reçoit pas de rappel de paiement pendant ce temps.</div>
+        <div class="fg2">
+          <div class="fg"><label class="fl">Début de l'inactivité</label><input class="fi" type="date" id="stInDate" value="${today}" max="${today}"></div>
+          <div class="fg"><label class="fl">Motif (facultatif)</label><input class="fi" id="stInNote" placeholder="Voyage, congé…"></div>
+        </div>
+        <button class="fb fb-gold" style="width:100%" onclick="stMarkInactive('${s.id}')">⏸️ Marquer inactif</button>
+      </div>`}
+    <div style="${box('#dc2626')}">
+      <b>🚪 Marquer quitté</b>
+      <div style="${help}">L'élève a quitté le markaz : il est envoyé <b>directement aux Archives</b> avec sa date de sortie. Plus aucune mensualité n'est due après cette date.</div>
+      <div class="fg2">
+        <div class="fg"><label class="fl">Date de sortie</label><input class="fi" type="date" id="stExDate" value="${today}" max="${today}"></div>
+        <div class="fg"><label class="fl">Motif (facultatif)</label><input class="fi" id="stExNote" placeholder="Déménagement, fin d'études…"></div>
+      </div>
+      <button class="fb fb-danger" style="width:100%" onclick="stMarkLeft('${s.id}')">🚪 Marquer quitté et archiver</button>
+    </div>
+    <div style="${box('#64748b')}">
+      <b>🗄️ Archiver sans date de sortie</b>
+      <div style="${help}">Même action que le bouton 🗄️ de la liste des élèves.</div>
+      <button class="fb fb-ghost" style="width:100%" onclick="closeModal();archiveStudent('${s.id}')">🗄️ Archiver</button>
+    </div>
+    ${hist.length?`<div class="fl" style="margin:6px 0">Historique des périodes d'inactivité</div>
+      ${hist.slice().reverse().map(x=>`<div style="font-size:12.5px;border:1px solid var(--line);border-radius:9px;padding:7px 10px;margin-bottom:5px">
+        ⏸️ du <b>${esc(oFr(x.from))}</b> ${x.to?`au <b>${esc(oFr(x.to))}</b> (retour)`:'— <b>en cours</b>'}${x.note?' · '+esc(x.note):''}</div>`).join('')}`:''}
+    <div style="display:flex;gap:8px;margin-top:10px"><button class="fb fb-ghost" style="flex:1" onclick="closeModal()">Fermer</button></div>`);
+}
+function stMarkInactive(id){
+  if (!stCanStatus()){ toast('⛔ Non autorisé.'); return; }
+  const s = DB.students.find(x=>x.id===id); if (!s) return;
+  const d = ((document.getElementById('stInDate')||{}).value||'').trim();
+  const note = ((document.getElementById('stInNote')||{}).value||'').trim();
+  if (!oD(d)){ toast("Indiquez la date de début de l'inactivité."); return; }
+  if (d > todayStr()){ toast('La date ne peut pas être dans le futur.'); return; }
+  const list = stInact(s);
+  const last = list[list.length-1];
+  if (last && !last.to){ toast('Cet élève est déjà inactif.'); return; }
+  if (last && last.to && d < last.to){ toast('La date doit être postérieure au dernier retour ('+oFr(last.to)+').'); return; }
+  list.push({ from:d, to:'', note });
+  s.inactivity = list;
+  saveDB();
+  logAction('Élève inactif', (s.first_name||'')+' '+(s.last_name||'')+' ('+(s.matricule||'')+') — depuis le '+oFr(d)+(note?' — '+note:''));
+  closeModal();
+  toast('⏸️ '+s.first_name+' est inactif depuis le '+oFr(d)+' : mensualités et dettes suspendues.');
+  oRefresh();
+}
+function stReactivate(id){
+  if (!stCanStatus()){ toast('⛔ Non autorisé.'); return; }
+  const s = DB.students.find(x=>x.id===id); if (!s) return;
+  const d = ((document.getElementById('stReDate')||{}).value||'').trim();
+  const list = stInact(s); const cur = list[list.length-1];
+  if (!cur || cur.to){ toast("Cet élève n'est pas inactif."); return; }
+  if (!oD(d)){ toast('Indiquez la date du retour.'); return; }
+  if (d > todayStr()){ toast('La date ne peut pas être dans le futur.'); return; }
+  if (d < cur.from){ toast("Le retour ne peut pas précéder le début de l'inactivité ("+oFr(cur.from)+').'); return; }
+  if (d === cur.from) list.pop();          // retour le jour même : la période est annulée
+  else cur.to = d;
+  s.inactivity = list;
+  saveDB();
+  logAction('Élève réactivé', (s.first_name||'')+' '+(s.last_name||'')+' ('+(s.matricule||'')+') — retour le '+oFr(d));
+  closeModal();
+  toast('▶️ '+s.first_name+' est de nouveau actif : les mensualités reprennent.');
+  oRefresh();
+}
+function stMarkLeft(id){
+  if (!stCanStatus()){ toast('⛔ Non autorisé.'); return; }
+  const s = DB.students.find(x=>x.id===id); if (!s) return;
+  const d = ((document.getElementById('stExDate')||{}).value||'').trim();
+  const reason = ((document.getElementById('stExNote')||{}).value||'').trim();
+  if (!oD(d)){ toast('Indiquez la date de sortie.'); return; }
+  if (d > todayStr()){ toast('La date de sortie ne peut pas être dans le futur.'); return; }
+  if (s.enrollment_date && d < String(s.enrollment_date).slice(0,10)){ toast("La date de sortie ne peut pas précéder l'inscription ("+oFr(s.enrollment_date)+').'); return; }
+  if (!confirm((s.first_name||'')+' '+(s.last_name||'')+' a quitté le markaz le '+oFr(d)+' ?\nIl sera envoyé directement aux Archives.')) return;
+  const list = stInact(s); const cur = list[list.length-1];
+  if (cur && !cur.to){ cur.to = d > cur.from ? d : cur.from; if (cur.to === cur.from) list.pop(); s.inactivity = list; }
+  s.exit_date = d;
+  if (reason) s.exit_reason = reason; else delete s.exit_reason;
+  s.status = 'non_actif';
+  DB.archives.push({ id: uid('ar'), student_id: s.id, archived_at: Date.now(), kind:'quitte', exit_date: d, exit_reason: reason,
+    snapshot: JSON.parse(JSON.stringify(s)) });
+  saveDB();
+  logAction('Élève quitté', (s.first_name||'')+' '+(s.last_name||'')+' ('+(s.matricule||'')+') — sortie le '+oFr(d)+(reason?' — '+reason:''));
+  closeModal();
+  toast('🚪 '+s.first_name+' '+s.last_name+' — sortie le '+oFr(d)+' : envoyé aux Archives.');
+  oRefresh();
+}
+
+/* ---- Restauration d'un élève parti : la période d'absence n'est pas facturée ---- */
+(function(){
+  if (window._agmORestoreHooked) return; window._agmORestoreHooked = true;
+  const _ra = restoreArchive;
+  restoreArchive = function(id){
+    try {
+      const a = DB.archives.find(x=>x.id===id);
+      const s = a && DB.students.find(x=>x.id===a.student_id);
+      if (s && s.exit_date){
+        const ex = String(s.exit_date).slice(0,10), back = todayStr();
+        if (back > ex){
+          const l = stInact(s);
+          l.push({ from: ex, to: back, note: 'Départ du markaz' + (s.exit_reason ? ' — ' + s.exit_reason : '') });
+          s.inactivity = l;
+        }
+        delete s.exit_date; delete s.exit_reason;
+      }
+    } catch(e){}
+    return _ra.apply(this, arguments);
+  };
+})();
+
+/* ---- Archives : cartes pleine largeur (date et motif de sortie visibles sur téléphone) ---- */
+renderArchives = function(){
+  const list = DB.archives.filter(a=>!a.restored_at);
+  const cards = list.map(a=>{
+    const s = a.snapshot || {};
+    const live = DB.students.find(x=>x.id===a.student_id);
+    const exit = a.exit_date || (live && live.exit_date) || s.exit_date || '';
+    const reason = a.exit_reason || (live && live.exit_reason) || s.exit_reason || '';
+    const hasAuth = !!DB.studentAuth[a.student_id];
+    let rest = 0;
+    if (exit && live && paymentStatusOf(live)==='payant'){ try { rest = studentDebtLedger(live.id).reduce((t,m)=>t+m.balance,0); } catch(e){} }
+    return `<div class="card" style="margin-bottom:10px;padding:12px 14px;border-left:4px solid ${exit?'#dc2626':'#64748b'}">
+      <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <div style="min-width:0"><b>${esc((s.first_name||'')+' '+(s.last_name||''))}</b>
+          <div style="font-size:11.5px;color:var(--muted);font-family:'DM Mono',monospace">${esc(s.matricule||'')}</div></div>
+        <div style="text-align:right">${exit?`<span class="badge badge-red">🚪 Quitté le ${esc(oFr(exit))}</span>`:'<span class="badge badge-slate">🗄️ Archivé</span>'}
+          <div style="font-size:11.5px;color:var(--muted);margin-top:3px">Archivé le ${new Date(a.archived_at).toLocaleDateString('fr-FR')}</div></div>
+      </div>
+      ${reason?`<div style="font-size:12px;margin-top:6px">Motif : ${esc(reason)}</div>`:''}
+      ${rest>0?`<div style="font-size:12px;margin-top:4px;color:#b91c1c">Reste dû à la sortie : <b>${fmtGNF(rest)}</b></div>`:''}
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">
+        <button class="fb fb-green fb-sm" onclick="restoreArchive('${a.id}')">↩️ Restaurer</button>
+        ${hasAuth?`<button class="fb fb-danger fb-sm" onclick="deleteBiometricData('${a.student_id}')" title="Supprime définitivement PIN, empreinte, visage et photo de vérification">🧬 Suppr. données biométriques</button>`:''}
+        <button class="fb fb-danger fb-sm" onclick="deleteArchive('${a.id}')">🗑️</button>
+      </div></div>`;
+  }).join('');
+  document.getElementById('pageContent').innerHTML = `
+    ${pageHead('Archives', 'Élèves désactivés — réservé au fondateur', printBtn('printArchives()'))}
+    ${cards || `<div class="table-wrap"><div class="empty-state"><div class="em">🗄️</div>Aucun élève archivé.</div></div>`}`;
+};
+
+/* ---- Formulaires élève : date d'arrivée au markaz (internes) ---- */
+function oInjectArrival(prefix, value){
+  const cat = document.getElementById(prefix==='st' ? 'stCategory' : 'edCat');
+  const anchor = document.getElementById(prefix==='st' ? 'stEnroll' : 'edEnroll');
+  if (!cat || !anchor || document.getElementById(prefix+'Arrival')) return;
+  const row = anchor.closest('.fg2') || anchor.closest('.fg');
+  if (!row || !row.parentNode) return;
+  const box = document.createElement('div');
+  box.className = 'fg'; box.id = prefix + 'ArrivalWrap';
+  box.innerHTML = `<label class="fl">🏠 Date d'arrivée au markaz (internat)</label>
+    <input class="fi" type="date" id="${prefix}Arrival" value="${esc(value||'')}" max="${todayStr()}">
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">Réglage du fondateur : la mensualité de l'interne court de son jour d'arrivée au même jour du mois suivant. Laissez vide pour utiliser la date d'inscription.</div>`;
+  row.parentNode.insertBefore(box, row.nextSibling);
+  const upd = ()=>{ box.style.display = (cat.value === 'internat' && debtCfg().internatArrival) ? 'block' : 'none'; };
+  cat.addEventListener('change', upd); upd();
+}
+(function(){
+  if (window._agmOStudentFormHooked) return; window._agmOStudentFormHooked = true;
+  const _osf = openStudentForm;
+  openStudentForm = function(){
+    const r = _osf.apply(this, arguments);
+    try { oInjectArrival('st', ''); } catch(e){}
+    try { rbInjectNewStudent(); } catch(e){}
+    return r;
+  };
+  const _ss = saveStudent;
+  saveStudent = function(){
+    const arr = ((document.getElementById('stArrival')||{}).value||'').trim();
+    const cat = (document.getElementById('stCategory')||{}).value;
+    const lvl = (document.getElementById('stLevel')||{}).value;
+    const bs = document.getElementById('stBookStep');
+    const step = bs ? Number(bs.value)||0 : null;
+    const n0 = DB.students.length;
+    const r = _ss.apply(this, arguments);
+    try {
+      if (DB.students.length > n0){
+        const s = DB.students[DB.students.length-1];
+        let changed = false;
+        if (arr && cat === 'internat' && debtCfg().internatArrival){ s.arrival_date = arr; changed = true; }
+        if (step !== null && lvl === 'hourouf'){
+          const p = getPlanning(s.id); const id = rbCfg().book;
+          if (id !== 'alphabet'){ p.book_step = step; p.book_step_of = id; changed = true; }
+        }
+        if (changed){ saveDB(); if (currentPage==='students') renderStudentsTable(); }
+      }
+    } catch(e){}
+    return r;
+  };
+  const _oes = openEditStudent;
+  openEditStudent = function(id){
+    const r = _oes.apply(this, arguments);
+    try { const s = DB.students.find(x=>x.id===id); if (s) oInjectArrival('ed', s.arrival_date || ''); } catch(e){}
+    return r;
+  };
+  const _ses = saveEditStudent;
+  saveEditStudent = function(id){
+    const el = document.getElementById('edArrival');
+    const arr = el ? (el.value||'').trim() : null;
+    const s0 = DB.students.find(x=>x.id===id);
+    const before = s0 ? s0.edited_at : null;
+    const r = _ses.apply(this, arguments);
+    try {
+      const s = DB.students.find(x=>x.id===id);
+      if (s && arr !== null && s.edited_at !== before && debtCfg().internatArrival){
+        if (s.category === 'internat' && arr){ if (s.arrival_date !== arr){ s.arrival_date = arr; saveDB(); renderStudents(); } }
+        else if (s.category === 'internat' && !arr && s.arrival_date){ delete s.arrival_date; saveDB(); renderStudents(); }
+      }
+    } catch(e){}
+    return r;
+  };
+})();
+
+
+/* =====================================================================
+   2) LECTURE — LIVRE D'APPRENTISSAGE DES ÉLÈVES HOUROUF
+   Choix du fondateur (clé facultative readingBooks). « Alphabet simple »
+   = fonctionnement actuel, lettre par lettre (aucun changement).
+   Avec un livre, l'élève progresse leçon par leçon (chaque leçon peut
+   être découpée en parties) ; les titres sont modifiables par le fondateur.
+   ===================================================================== */
+const RB_KIND_LABEL = {
+  letters:'Lettres isolées', forms:'Formes des lettres (début, milieu, fin)', muqattaat:'Lettres détachées (muqatta’ât)',
+  fatha:'Fatha', kasra:'Kasra', damma:'Damma', harakat:'Les trois voyelles', tanwin:'Tanwîn',
+  exo:'Exercices : mots voyellés', khari:'Voyelles verticales (petite alif, petit wâw, petit yâ)', madd:'Prolongation (madd)',
+  leen:'Lettres douces (lîn)', sukun:'Sukûn', exo_sukun:'Exercices sur le sukûn', shadda:'Chadda',
+  shadda2:'Chadda suivie de chadda', shadda_sukun:'Chadda et sukûn', lam:'Lâm qamariyya et chamsiyya',
+  tajwid:'Nûn sâkina et tanwîn', waqf:'Signes d’arrêt (waqf)', words:'Lecture de mots', sentences:'Lecture de phrases',
+  surahs:'Lecture des courtes sourates'
+};
+const RB_BOOKS = [
+  { id:'alphabet', name:'Alphabet simple — lettre par lettre', short:'Alphabet', ar:'الحروف الهجائية',
+    desc:'Méthode actuelle de l’application : les 28 lettres, une par une.', lessons:null },
+  { id:'nouraniya', name:"Al-Qâ'ida an-Nûrâniyya", short:'Nourâniyya', ar:'القاعدة النورانية',
+    desc:"Méthode du cheikh Nour Mohammad Haqqani : des lettres isolées jusqu'aux règles de lecture du Coran.",
+    lessons:[
+      {t:'Les lettres isolées', ar:'الحروف الهجائية المفردة', k:'letters', n:7},
+      {t:'Les lettres composées (attachées)', ar:'الحروف المركبة', k:'forms', n:7},
+      {t:'Les lettres détachées (muqatta’ât)', ar:'الحروف المقطعة', k:'muqattaat', n:1},
+      {t:'Les voyelles : fatha, kasra, damma', ar:'الحركات', k:'harakat', n:7},
+      {t:'Le tanwîn', ar:'التنوين', k:'tanwin', n:7},
+      {t:'Exercices : voyelles et tanwîn', ar:'تمرين على الحركات والتنوين', k:'exo', n:2},
+      {t:'Les voyelles verticales', ar:'الحركات القائمة', k:'khari', n:1},
+      {t:'Les lettres de prolongation (madd)', ar:'حروف المد', k:'madd', n:4},
+      {t:'Les lettres douces (lîn)', ar:'حروف اللين', k:'leen', n:2},
+      {t:'Le sukûn', ar:'السكون', k:'sukun', n:4},
+      {t:'Exercices sur le sukûn', ar:'تمرين على السكون', k:'exo_sukun', n:2},
+      {t:'La chadda', ar:'التشديد', k:'shadda', n:4},
+      {t:'Chadda suivie de chadda', ar:'التشديد مع التشديد', k:'shadda2', n:2},
+      {t:'Chadda et sukûn', ar:'التشديد مع السكون', k:'shadda_sukun', n:2},
+      {t:'Lâm qamariyya et chamsiyya', ar:'اللام القمرية والشمسية', k:'lam', n:1},
+      {t:'Nûn sâkina et tanwîn', ar:'أحكام النون الساكنة والتنوين', k:'tajwid', n:2},
+      {t:'Les arrêts (waqf) et la lecture', ar:'الوقف والابتداء', k:'waqf', n:1}
+    ] },
+  { id:'nourbayan', name:'Nour al-Bayân', short:'Nour al-Bayân', ar:'نور البيان',
+    desc:'Méthode très répandue en Afrique de l’Ouest : lettres, formes, voyelles une à une, puis lecture et tajwîd de base.',
+    lessons:[
+      {t:'Les lettres de l’alphabet', ar:'الحروف الهجائية', k:'letters', n:7},
+      {t:'Les formes des lettres (début, milieu, fin)', ar:'أشكال الحروف', k:'forms', n:7},
+      {t:'La fatha', ar:'الفتحة', k:'fatha', n:4},
+      {t:'La kasra', ar:'الكسرة', k:'kasra', n:4},
+      {t:'La damma', ar:'الضمة', k:'damma', n:4},
+      {t:'Les trois voyelles', ar:'الحركات الثلاث', k:'harakat', n:4},
+      {t:'Le sukûn', ar:'السكون', k:'sukun', n:4},
+      {t:'Les prolongations (madd)', ar:'المدود', k:'madd', n:4},
+      {t:'Le tanwîn', ar:'التنوين', k:'tanwin', n:4},
+      {t:'La chadda', ar:'الشدة', k:'shadda', n:4},
+      {t:'Lâm chamsiyya et qamariyya', ar:'اللام الشمسية والقمرية', k:'lam', n:1},
+      {t:'Lecture de mots et de phrases', ar:'قراءة الكلمات والجمل', k:'words', n:3},
+      {t:'Règles de tajwîd de base', ar:'أحكام التجويد', k:'tajwid', n:2},
+      {t:'Lecture des courtes sourates', ar:'قراءة السور القصيرة', k:'surahs', n:1}
+    ] },
+  { id:'madaniya', name:"Al-Qâ'ida al-Madaniyya", short:'Madaniyya', ar:'القاعدة المدنية',
+    desc:'Méthode « Madani Qaida » : progression proche de la Nourâniyya, avec exercices de lecture du Coran.',
+    lessons:[
+      {t:'Les lettres isolées', ar:'الحروف المفردة', k:'letters', n:7},
+      {t:'Les lettres composées', ar:'الحروف المركبة', k:'forms', n:7},
+      {t:'Les lettres muqatta’ât', ar:'الحروف المقطعات', k:'muqattaat', n:1},
+      {t:'Les voyelles (harakât)', ar:'الحركات', k:'harakat', n:7},
+      {t:'Le tanwîn', ar:'التنوين', k:'tanwin', n:7},
+      {t:'Exercices : voyelles et tanwîn', ar:'تمرين', k:'exo', n:2},
+      {t:'Les voyelles verticales', ar:'الحركات القائمة', k:'khari', n:1},
+      {t:'Les lettres de madd', ar:'حروف المد', k:'madd', n:4},
+      {t:'Les lettres de lîn', ar:'حروف اللين', k:'leen', n:2},
+      {t:'Le sukûn (jazm)', ar:'السكون', k:'sukun', n:4},
+      {t:'La chadda', ar:'التشديد', k:'shadda', n:4},
+      {t:'Chadda suivie de chadda', ar:'التشديد مع التشديد', k:'shadda2', n:2},
+      {t:'Chadda et sukûn', ar:'التشديد مع السكون', k:'shadda_sukun', n:2},
+      {t:'La ghunna et les règles du nûn', ar:'الغنة وأحكام النون', k:'tajwid', n:2},
+      {t:'Les arrêts (waqf)', ar:'الوقف', k:'waqf', n:1},
+      {t:'Exercices de lecture du Coran', ar:'تمرين على القراءة', k:'sentences', n:2}
+    ] },
+  { id:'mouallim', name:"Mou'allim al-Qirâ'a", short:"Mou'allim al-Qirâ'a", ar:'معلّم القراءة',
+    desc:'Manuel d’initiation à la lecture : lettres et prononciation, voyelles, puis lecture de mots, de phrases et de textes.',
+    lessons:[
+      {t:'Les lettres et leur prononciation', ar:'الحروف ومخارجها', k:'letters', n:7},
+      {t:'Les formes des lettres', ar:'أشكال الحروف', k:'forms', n:7},
+      {t:'La fatha', ar:'الفتحة', k:'fatha', n:4},
+      {t:'La kasra', ar:'الكسرة', k:'kasra', n:4},
+      {t:'La damma', ar:'الضمة', k:'damma', n:4},
+      {t:'Révision des voyelles', ar:'مراجعة الحركات', k:'harakat', n:4},
+      {t:'Les prolongations (alif, wâw, yâ)', ar:'المدود', k:'madd', n:4},
+      {t:'Le sukûn', ar:'السكون', k:'sukun', n:4},
+      {t:'Le tanwîn', ar:'التنوين', k:'tanwin', n:4},
+      {t:'La chadda', ar:'الشدة', k:'shadda', n:4},
+      {t:'L’article (al-) : lâm qamariyya et chamsiyya', ar:'ال التعريف', k:'lam', n:1},
+      {t:'Lecture de mots', ar:'قراءة الكلمات', k:'words', n:3},
+      {t:'Lecture de phrases et de textes', ar:'قراءة الجمل والنصوص', k:'sentences', n:2}
+    ] },
+  { id:'baghdadiya', name:"Al-Qâ'ida al-Baghdâdiyya", short:'Baghdâdiyya', ar:'القاعدة البغدادية',
+    desc:'Méthode classique : épellation des lettres avec chaque voyelle, puis lecture directe du Juz ‘Amma.',
+    lessons:[
+      {t:'Les lettres et leurs noms', ar:'الحروف الهجائية وأسماؤها', k:'letters', n:7},
+      {t:'Les lettres avec la fatha', ar:'الحروف مع الفتحة', k:'fatha', n:4},
+      {t:'Les lettres avec la kasra', ar:'الحروف مع الكسرة', k:'kasra', n:4},
+      {t:'Les lettres avec la damma', ar:'الحروف مع الضمة', k:'damma', n:4},
+      {t:'Épellation des trois voyelles', ar:'تهجي الحركات', k:'harakat', n:4},
+      {t:'Le tanwîn', ar:'التنوين', k:'tanwin', n:4},
+      {t:'Le sukûn', ar:'السكون', k:'sukun', n:4},
+      {t:'La chadda', ar:'الشدة', k:'shadda', n:4},
+      {t:'Les prolongations (madd)', ar:'المدود', k:'madd', n:4},
+      {t:'Lecture du Juz ‘Amma (dès al-Fâtiha)', ar:'قراءة جزء عمّ', k:'surahs', n:1}
+    ] }
+];
+
+/* ---- Contenu imprimable de chaque type de leçon ---- */
+function rbItems(kind){
+  const F='َ', K='ِ', D='ُ', S='ْ', SH='ّ', FN='ً', KN='ٍ', DN='ٌ', T='ـ';
+  const NJ = ['ا','د','ذ','ر','ز','و'];
+  const H = HOUROUF.slice();
+  const noAlif = H.filter(L=>L!=='ا');
+  switch(kind){
+    case 'letters': return H;
+    case 'forms': return H.map(L=> NJ.includes(L) ? `${L}   ${T}${L}` : `${L}${T}   ${T}${L}${T}   ${T}${L}`);
+    case 'fatha': return H.map(L=> (L==='ا'?'أ':L)+F);
+    case 'kasra': return H.map(L=> (L==='ا'?'إ':L)+K);
+    case 'damma': return H.map(L=> (L==='ا'?'أ':L)+D);
+    case 'harakat': return H.map(L=> L==='ا' ? `أ${F}  إ${K}  أ${D}` : `${L}${F}  ${L}${K}  ${L}${D}`);
+    case 'tanwin': return H.map(L=> L==='ا' ? `أ${FN}  إ${KN}  أ${DN}` : `${L}${FN}ا  ${L}${KN}  ${L}${DN}`);
+    case 'madd': return H.map(L=> L==='ا' ? `آ  إ${K}ي  أ${D}و` : `${L}${F}ا  ${L}${K}ي  ${L}${D}و`);
+    case 'leen': return H.map(L=> L==='ا' ? `أ${F}ي${S}  أ${F}و${S}` : `${L}${F}ي${S}  ${L}${F}و${S}`);
+    case 'sukun': return noAlif.map(L=> `أ${F}${L}${S}  إ${K}${L}${S}  أ${D}${L}${S}`);
+    case 'shadda': return noAlif.map(L=> `أ${F}${L}${SH}${F}  أ${F}${L}${SH}${K}  أ${F}${L}${SH}${D}`);
+    case 'muqattaat': return ['الم','المص','الر','المر','كهيعص','طه','طسم','طس','يس','ص','حم','عسق','ق','ن'];
+    case 'exo': return ['كَتَبَ','خَلَقَ','جَعَلَ','ذَهَبَ','سَمِعَ','عَلِمَ','أَحَدٌ','كُتُبٌ','رُسُلٌ','وَلَدٌ','قَمَرٌ','بَصَرٌ'];
+    case 'khari': return ['هٰذَا','ذٰلِكَ','لٰكِنْ','إِلٰهٌ','الرَّحْمٰنُ','لَهٗ','بِهٖ'];
+    case 'exo_sukun': return ['قُلْ','لَمْ','مِنْ','عَنْ','هَلْ','بَلْ','قَدْ','أَنْتَ','يَعْلَمُ','مَسْجِدٌ'];
+    case 'shadda2': return ['ثُمَّ','إِنَّ','رَبِّ','مُحَمَّدٌ','أَيُّهَا','الْمُزَّمِّلُ','الْمُدَّثِّرُ'];
+    case 'shadda_sukun': return ['رَبُّكُمْ','إِنَّهُمْ','عَلَّمْتَ','كَذَّبَتْ','يُحِبُّكُمْ'];
+    case 'lam': return ['الْقَمَرُ','الْكِتَابُ','الْعِلْمُ','الْبَيْتُ','الشَّمْسُ','النُّورُ','الرَّحِيمُ','السَّلَامُ','الدِّينُ','التِّينُ'];
+    case 'tajwid': return ['إِظْهَار : مَنْ آمَنَ','إِدْغَام : مِنْ وَالٍ','إِقْلَاب : مِنْ بَعْدِ','إِخْفَاء : مِنْ قَبْلِ','غُنَّة : إِنَّ — ثُمَّ'];
+    case 'waqf': return ['م : الوقف اللازم','لا : لا تقف','ج : الوقف الجائز','صلى : الوصل أولى','قلى : الوقف أولى','؞ ؞ : وقف المعانقة'];
+    case 'words': return ['كِتَابٌ','قَلَمٌ','بَابٌ','مَسْجِدٌ','مُعَلِّمٌ','تِلْمِيذٌ','قَرَأَ','جَلَسَ','كَتَبَ','دَرَسَ'];
+    case 'sentences': return ['بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ','الْحَمْدُ لِلَّهِ','سُبْحَانَ اللَّهِ','اللَّهُ أَكْبَرُ','لَا إِلَٰهَ إِلَّا اللَّهُ','أَسْتَغْفِرُ اللَّهَ'];
+    case 'surahs': return ['الفاتحة','الناس','الفلق','الإخلاص','المسد','النصر','الكافرون','الكوثر','الماعون','قريش','الفيل','الهمزة','العصر','التكاثر'];
+  }
+  return H;
+}
+function rbPartItems(kind, part, n){
+  const items = rbItems(kind);
+  n = Math.max(1, n||1);
+  if (n <= 1) return items;
+  const a = Math.floor(part*items.length/n), b = Math.floor((part+1)*items.length/n);
+  const sl = items.slice(a, b);
+  return sl.length ? sl : items;
+}
+
+/* ---- Configuration ---- */
+function rbCfg(){
+  const c = DB.readingBooks || {};
+  return { book: RB_BOOKS.some(b=>b.id===c.book) ? c.book : 'alphabet',
+           lessons: (c.lessons && typeof c.lessons === 'object') ? c.lessons : {} };
+}
+function rbBook(id){ return RB_BOOKS.find(b=>b.id===id) || RB_BOOKS[0]; }
+function rbLessons(id){
+  const custom = nArr(rbCfg().lessons[id]).filter(x=>x && x.t);
+  return custom.length ? custom : (rbBook(id).lessons || []);
+}
+function rbSteps(id){
+  const out = [];
+  rbLessons(id).forEach((L, li)=>{
+    const n = Math.max(1, Math.min(30, Math.round(Number(L.n)||1)));
+    for (let p = 0; p < n; p++) out.push({ li, p, n, t:String(L.t||''), ar:String(L.ar||''), k:L.k || 'letters' });
+  });
+  return out;
+}
+function rbBookIdOf(p){
+  const id = (p && p.book_id) || rbCfg().book;
+  return RB_BOOKS.some(b=>b.id===id) ? id : 'alphabet';
+}
+function rbIsAlpha(p){ return rbBookIdOf(p) === 'alphabet'; }
+function rbCur(p){
+  const id = rbBookIdOf(p);
+  const steps = rbSteps(id);
+  let i = (p && p.book_step_of === id) ? Math.round(Number(p.book_step)||0) : 0;
+  i = Math.max(0, Math.min(steps.length-1, i));
+  return { id, book: rbBook(id), steps, i, st: steps[i], L: rbLessons(id).length };
+}
+function rbStepLabel(st, L){
+  if (!st) return '—';
+  return `Leçon ${st.li+1}/${L} — ${st.t}${st.n>1 ? ' ('+(st.p+1)+'/'+st.n+')' : ''}`;
+}
+/** Libellés Hourouf : identiques à l'existant en mode « Alphabet simple ». */
+function rbTxt(p, v){
+  if (rbIsAlpha(p)){
+    switch(v){
+      case 'position': return 'Hourouf — lettre ' + ((p.hourouf_index||0)+1) + '/' + HOUROUF.length;
+      case 'badge':    return `🔤 Hourouf (${HOUROUF[p.hourouf_index]||'—'})`;
+      case 'prog':     return `Lettre ${p.hourouf_index+1}/${HOUROUF.length}`;
+      case 'new':      return `Lettre ${HOUROUF[p.hourouf_index]||'—'} (${p.hourouf_index+1}/${HOUROUF.length})`;
+      case 'old':      return (p.hourouf_index>0 ? `Lettres 1 → ${p.hourouf_index}` : '—');
+      case 'lesson':   return `Lettre ${HOUROUF[p.hourouf_index]||''} (${p.hourouf_index+1})`;
+      case 'p1':       return 'Lettre '+(p.hourouf_index+1);
+      case 'p2':       return 'Lettre '+(p.hourouf_index+1)+'/'+HOUROUF.length;
+      case 'p3':       return 'Lettre '+HOUROUF[p.hourouf_index]+' — '+(p.hourouf_index+1)+'/'+HOUROUF.length;
+      case 'p4':       return 'Lettre '+HOUROUF[p.hourouf_index];
+    }
+    return '';
+  }
+  const c = rbCur(p), st = c.st, short = c.book.short;
+  if (!st) return short;
+  switch(v){
+    case 'position': return `Hourouf — ${short} · leçon ${st.li+1}/${c.L}${st.n>1?' ('+(st.p+1)+'/'+st.n+')':''}`;
+    case 'badge':    return `📘 ${short}`;
+    case 'old':      return c.i > 0 ? 'Révision : ' + rbStepLabel(c.steps[c.i-1], c.L) : '—';
+    case 'lesson':   return `${short} — ${rbStepLabel(st, c.L)}`;
+    case 'p1': case 'p4': return `${short} — leçon ${st.li+1}${st.n>1?'.'+(st.p+1):''} : ${st.t}`;
+  }
+  return `${short} — ${rbStepLabel(st, c.L)}`;
+}
+/** Passage à l'étape suivante ; faux quand le livre (ou l'alphabet) est terminé. */
+function rbAdvance(p){
+  if (rbIsAlpha(p)){
+    if (p.hourouf_index < HOUROUF.length-1){ p.hourouf_index++; return true; }
+    return false;
+  }
+  const c = rbCur(p);
+  if (c.i < c.steps.length-1){ p.book_step = c.i + 1; p.book_step_of = c.id; return true; }
+  return false;
+}
+function rbDoneMsg(p){ return rbIsAlpha(p) ? 'Alphabet terminé : passage au Coran.' : 'Livre « ' + rbCur(p).book.name + ' » terminé : passage au Coran.'; }
+function rbLessonExtra(p){
+  if (!p || p.level !== 'hourouf' || rbIsAlpha(p)) return {};
+  const c = rbCur(p);
+  return { book_id: c.id, book_step: c.i };
+}
+
+/* ---- Fiches imprimables (planches) ---- */
+function rbShowSheet(title, sections, s){
+  const primary = (DB.theme&&DB.theme.primary)||'#15803d';
+  const accent  = (DB.theme&&DB.theme.accent)||'#d4a03c';
+  const who = ((s&&s.first_name)||'')+' '+((s&&s.last_name)||'');
+  const w = window.open('', '_blank', 'width=900,height=900');
+  if (!w){ toast('Autorisez les fenêtres pop-up.'); return; }
+  const body = sections.map(sec=>`
+    <div class="sec"><div class="st">${esc(sec.head)}</div>${sec.ar?`<div class="sa">${esc(sec.ar)}</div>`:''}</div>
+    <div class="grid">${sec.items.map(x=>`<div class="hcell${sec.big?' big':''}">${esc(x)}</div>`).join('')}</div>`).join('');
+  w.document.write(`<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>${esc(title)}</title>
+  <link href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=DM+Sans:wght@400;700;800&display=swap" rel="stylesheet">
+  <style>
+    *{ -webkit-print-color-adjust:exact!important; print-color-adjust:exact!important; color-adjust:exact!important; }
+    @page{size:A4;margin:12mm}
+    body{margin:0;padding:18px;background:#eef1ef;font-family:'DM Sans',Arial,sans-serif}
+    .top{background:${primary};color:#fff;border-radius:12px;padding:14px 20px;margin:0 auto 16px;max-width:190mm;direction:ltr}
+    .top h1{margin:0;font-size:19px;font-weight:800}.top p{margin:3px 0 0;font-size:12.5px;opacity:.9}
+    .bar{display:flex;gap:8px;justify-content:center;margin-bottom:16px;direction:ltr}
+    button{padding:10px 16px;border:0;border-radius:8px;font-weight:700;cursor:pointer;background:${primary};color:#fff;font-family:'DM Sans',Arial,sans-serif}
+    button.alt{background:#fff;color:${primary};border:1px solid #cbd5d0}
+    .sec{max-width:190mm;margin:14px auto 6px;direction:ltr;display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+    .st{font-weight:800;font-size:14px;color:${primary}} .sa{font-family:'Amiri',serif;font-size:20px;color:#333}
+    .grid{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;background:#fffdf7;border:2px solid ${accent};
+      border-radius:14px;padding:22px;max-width:190mm;margin:0 auto}
+    .hcell{min-width:96px;padding:8px 16px;display:flex;align-items:center;justify-content:center;background:#fff;
+      border:1px solid #e7e1cf;border-radius:14px;font-family:'Amiri',serif;font-size:40px;line-height:1.7;color:#1a1a1a;white-space:pre}
+    .hcell.big{width:110px;height:110px;padding:0;font-size:62px}
+    @media print{.bar{display:none}body{background:#fff;padding:0}}
+  </style></head><body>
+    <div class="bar"><button onclick="window.print()">🖨️ Imprimer PDF A4</button>
+    <button class="alt" onclick="window.close()">✖ Fermer</button></div>
+    <div class="top"><h1>${esc(title)}</h1><p>${esc(who)} · ${esc(DB.centerName||'AGM')}</p></div>
+    ${body}
+  </body></html>`);
+  w.document.close();
+}
+function rbSection(c, idx){
+  const st = c.steps[idx]; if (!st) return null;
+  return { head: c.book.short + ' — ' + rbStepLabel(st, c.L), ar: st.ar, items: rbPartItems(st.k, st.p, st.n), big: st.k === 'letters' };
+}
+function rbOpenSheet(s, p, which){
+  const c = rbCur(p);
+  if (which === 'old'){
+    if (c.i <= 0){ toast("Aucune ancienne leçon : l'élève débute le livre."); return; }
+    const secs = [c.i-1, c.i-2].filter(i=>i>=0).map(i=>rbSection(c, i)).filter(Boolean).reverse();
+    rbShowSheet('Ancienne leçon — ' + c.book.short, secs, s);
+    return;
+  }
+  rbShowSheet('Nouvelle leçon — ' + c.book.short, [rbSection(c, c.i)].filter(Boolean), s);
+}
+function rbOpenLessonSheet(l, s){
+  const id = RB_BOOKS.some(b=>b.id===l.book_id) ? l.book_id : rbCfg().book;
+  const steps = rbSteps(id);
+  const c = { id, book: rbBook(id), steps, i: Math.max(0, Math.min(steps.length-1, Number(l.book_step)||0)), L: rbLessons(id).length };
+  rbShowSheet('À restituer — ' + c.book.short, [rbSection(c, c.i)].filter(Boolean), s);
+}
+
+/* ---- Fenêtre du fondateur : choix du livre ---- */
+function rbOpenConfig(){
+  if (!isAdminOrAbove()){ toast('Réservé au fondateur / administrateur.'); return; }
+  const cur = rbCfg().book;
+  const nH = (DB.plannings||[]).filter(p=>p.level==='hourouf' && (DB.students.find(s=>s.id===p.student_id)||{}).status!=='non_actif').length;
+  openModal(`
+    <h3 style="margin:0 0 4px">📘 Livre de lecture — élèves Hourouf</h3>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">Choisissez la méthode utilisée par le markaz pour l'apprentissage de la lecture arabe (${nH} élève(s) au niveau Hourouf). Un élève peut aussi suivre un autre livre : Planning ▸ ⚙️ Programme.</p>
+    ${RB_BOOKS.map(b=>{
+      const L = b.lessons ? rbLessons(b.id).length : 28;
+      const n = b.lessons ? rbSteps(b.id).length : 28;
+      return `<label style="display:flex;gap:10px;align-items:flex-start;border:2px solid ${cur===b.id?'var(--brand)':'var(--line)'};border-radius:12px;padding:10px 12px;margin-bottom:8px;cursor:pointer;background:${cur===b.id?'rgba(21,128,61,.06)':'transparent'}">
+        <input type="radio" name="rbBook" value="${b.id}" ${cur===b.id?'checked':''} style="margin-top:4px">
+        <span style="flex:1;min-width:0"><b>${esc(b.name)}</b> <span style="font-family:'Amiri',serif;font-size:16px">${esc(b.ar)}</span>
+          <span style="display:block;font-size:11.5px;color:var(--muted);margin-top:2px">${esc(b.desc)}</span>
+          <span style="display:block;font-size:11px;color:var(--muted);margin-top:2px">${b.lessons?L+' leçons · '+n+' étapes'+(nArr(rbCfg().lessons[b.id]).length?' · personnalisé':''):'28 lettres'}</span></span></label>`;
+    }).join('')}
+    <div style="font-size:11.5px;color:var(--muted);margin:6px 0 10px">Chaque élève progresse étape par étape : ✅ Maîtrisé dans Lecture, puis validation en Restitution. Les leçons et leurs titres sont modifiables pour correspondre à votre édition du livre.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="fb fb-gold" style="flex:1" onclick="rbSaveConfig()">💾 Enregistrer</button>
+      <button class="fb fb-ghost" onclick="rbOpenEditor((document.querySelector('input[name=rbBook]:checked')||{}).value)">✏️ Leçons du livre</button>
+      <button class="fb fb-ghost" onclick="closeModal()">Fermer</button>
+    </div>`);
+}
+function rbSaveConfig(){
+  if (!isAdminOrAbove()) return;
+  const v = (document.querySelector('input[name="rbBook"]:checked')||{}).value || 'alphabet';
+  DB.readingBooks = Object.assign({}, DB.readingBooks || {}, { book: v, updatedAt: Date.now() });
+  saveDB();
+  logAction('Livre de lecture', 'Méthode Hourouf : ' + rbBook(v).name);
+  closeModal();
+  toast('✅ Livre de lecture : ' + rbBook(v).name);
+  if (['lecture','planning','settings','students'].includes(currentPage)) navigate(currentPage);
+}
+let RB_EDIT = null;
+function rbOpenEditor(id){
+  if (!isAdminOrAbove()) return;
+  if (!id || id === 'alphabet' || !rbBook(id).lessons){ toast('Choisissez d’abord un livre (l’alphabet simple n’a pas de leçons à modifier).'); return; }
+  RB_EDIT = { id, lessons: nClone(rbLessons(id)) };
+  rbRenderEditor();
+}
+function rbCollectEditor(){
+  if (!RB_EDIT) return;
+  RB_EDIT.lessons.forEach((L, i)=>{
+    const g = k => document.getElementById('rbE_'+k+'_'+i);
+    if (g('t')) L.t = g('t').value.trim();
+    if (g('ar')) L.ar = g('ar').value.trim();
+    if (g('k')) L.k = g('k').value;
+    if (g('n')) L.n = Math.max(1, Math.min(30, Math.round(Number(g('n').value)||1)));
+  });
+}
+function rbRenderEditor(){
+  const E = RB_EDIT; if (!E) return;
+  const b = rbBook(E.id);
+  const kOpts = sel => Object.keys(RB_KIND_LABEL).map(k=>`<option value="${k}" ${k===sel?'selected':''}>${esc(RB_KIND_LABEL[k])}</option>`).join('');
+  openModal(`
+    <h3 style="margin:0 0 4px">✏️ Leçons — ${esc(b.name)}</h3>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">Adaptez les titres, l'ordre et le nombre de parties de chaque leçon à l'édition utilisée au markaz. Le « contenu » choisit la planche imprimable proposée à l'élève.</p>
+    ${E.lessons.map((L,i)=>`<div style="border:1px solid var(--line);border-radius:11px;padding:10px 11px;margin-bottom:8px;background:var(--panel)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px"><b>Leçon ${i+1}</b>
+        <span style="display:flex;gap:4px">
+          <button class="fb fb-ghost fb-sm" ${i===0?'disabled':''} onclick="rbEdMove(${i},-1)">▲</button>
+          <button class="fb fb-ghost fb-sm" ${i===E.lessons.length-1?'disabled':''} onclick="rbEdMove(${i},1)">▼</button>
+          <button class="fb fb-danger fb-sm" onclick="rbEdDel(${i})">✖</button></span></div>
+      <div class="fg"><input class="fi" id="rbE_t_${i}" value="${esc(L.t||'')}" placeholder="Titre de la leçon"></div>
+      <div class="fg2">
+        <div class="fg"><input class="fi" id="rbE_ar_${i}" dir="rtl" value="${esc(L.ar||'')}" placeholder="Titre en arabe (facultatif)"></div>
+        <div class="fg"><label class="fl">Parties</label><input class="fi" type="number" min="1" max="30" id="rbE_n_${i}" value="${Number(L.n)||1}"></div>
+      </div>
+      <div class="fg" style="margin-bottom:0"><label class="fl">Contenu de la planche</label><select class="fi" id="rbE_k_${i}">${kOpts(L.k||'letters')}</select></div>
+    </div>`).join('')}
+    <button class="fb fb-ghost" style="width:100%;margin-bottom:10px" onclick="rbEdAdd()">+ Ajouter une leçon</button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="fb fb-gold" style="flex:1" onclick="rbEdSave()">💾 Enregistrer les leçons</button>
+      <button class="fb fb-ghost" onclick="rbEdReset()">↺ Programme d'origine</button>
+      <button class="fb fb-ghost" onclick="rbOpenConfig()">← Retour</button>
+    </div>`);
+}
+function rbEdMove(i, d){ rbCollectEditor(); const a = RB_EDIT.lessons; const j = i+d; if (j<0||j>=a.length) return; const t = a[i]; a[i] = a[j]; a[j] = t; rbRenderEditor(); }
+function rbEdDel(i){ rbCollectEditor(); if (RB_EDIT.lessons.length <= 1){ toast('Le livre doit garder au moins une leçon.'); return; } RB_EDIT.lessons.splice(i,1); rbRenderEditor(); }
+function rbEdAdd(){ rbCollectEditor(); RB_EDIT.lessons.push({ t:'Nouvelle leçon', ar:'', k:'words', n:1 }); rbRenderEditor(); }
+function rbEdSave(){
+  if (!isAdminOrAbove() || !RB_EDIT) return;
+  rbCollectEditor();
+  const ls = RB_EDIT.lessons.filter(L=>L.t);
+  if (!ls.length){ toast('Donnez un titre à au moins une leçon.'); return; }
+  const cfg = Object.assign({}, DB.readingBooks || {});
+  cfg.lessons = Object.assign({}, cfg.lessons || {}); cfg.lessons[RB_EDIT.id] = ls;
+  if (!cfg.book) cfg.book = 'alphabet';
+  cfg.updatedAt = Date.now();
+  DB.readingBooks = cfg; saveDB();
+  logAction('Livre de lecture', 'Leçons personnalisées : ' + rbBook(RB_EDIT.id).name + ' (' + ls.length + ' leçons)');
+  toast('✅ Leçons enregistrées.');
+  rbOpenConfig();
+}
+function rbEdReset(){
+  if (!isAdminOrAbove() || !RB_EDIT) return;
+  if (!confirm("Revenir au programme d'origine de ce livre ?")) return;
+  if (DB.readingBooks && DB.readingBooks.lessons){ const l = Object.assign({}, DB.readingBooks.lessons); delete l[RB_EDIT.id]; DB.readingBooks.lessons = l; saveDB(); }
+  RB_EDIT = { id: RB_EDIT.id, lessons: nClone(rbBook(RB_EDIT.id).lessons) };
+  rbRenderEditor();
+  toast("Programme d'origine rétabli.");
+}
+
+/* ---- Formulaires : leçon de départ / en cours selon le livre ---- */
+function rbStepOptions(id, sel){
+  return rbSteps(id).map((st, i)=>`<option value="${i}" ${i===sel?'selected':''}>${esc(rbStepLabel(st, rbLessons(id).length))}</option>`).join('');
+}
+function rbInjectNewStudent(){
+  const id = rbCfg().book; if (id === 'alphabet') return;
+  const hSel = document.getElementById('stHIdx'); if (!hSel || document.getElementById('stBookStep')) return;
+  const fg = hSel.closest('.fg'); if (!fg) return;
+  fg.style.display = 'none';
+  const box = document.createElement('div'); box.className = 'fg';
+  box.innerHTML = `<label class="fl">📘 Leçon de départ — ${esc(rbBook(id).name)}</label><select class="fi" id="stBookStep">${rbStepOptions(id, 0)}</select>`;
+  fg.parentNode.insertBefore(box, fg.nextSibling);
+}
+function rbPlBookChange(){
+  const sel = document.getElementById('plBook'); if (!sel) return;
+  const id = sel.value || rbCfg().book;
+  const hEl = document.getElementById('plHIdx');
+  const hFg = hEl ? hEl.closest('.fg') : null;
+  const wrap = document.getElementById('plBookStepWrap');
+  const alpha = id === 'alphabet';
+  if (hFg) hFg.style.display = alpha ? '' : 'none';
+  if (wrap){
+    wrap.style.display = alpha ? 'none' : '';
+    const st = document.getElementById('plBookStep');
+    const p = window._rbPlP || {};
+    const cur = (p.book_step_of === id) ? Number(p.book_step)||0 : 0;
+    if (st) st.innerHTML = alpha ? '' : rbStepOptions(id, cur);
+  }
+}
+(function(){
+  if (window._agmOPlanHooked) return; window._agmOPlanHooked = true;
+  const _opf = openPlanningForm;
+  openPlanningForm = function(studentId){
+    const r = _opf.apply(this, arguments);
+    try {
+      const box = document.getElementById('plHourouf');
+      if (box && !document.getElementById('plBook')){
+        const p = getPlanning(studentId); window._rbPlP = p;
+        const def = rbBook(rbCfg().book);
+        const div = document.createElement('div');
+        div.innerHTML = `<div class="fg"><label class="fl">📘 Livre utilisé</label><select class="fi" id="plBook" onchange="rbPlBookChange()">
+            <option value="" ${!p.book_id?'selected':''}>Livre du markaz — ${esc(def.name)}</option>
+            ${RB_BOOKS.map(b=>`<option value="${b.id}" ${p.book_id===b.id?'selected':''}>${esc(b.name)}</option>`).join('')}
+          </select></div>
+          <div class="fg" id="plBookStepWrap"><label class="fl">Leçon en cours</label><select class="fi" id="plBookStep"></select></div>`;
+        box.insertBefore(div, box.firstChild);
+        rbPlBookChange();
+      }
+    } catch(e){}
+    return r;
+  };
+  const _sp = savePlanning;
+  savePlanning = function(studentId){
+    try {
+      const lvl = (document.getElementById('plLevel')||{}).value;
+      const sel = document.getElementById('plBook');
+      if (lvl === 'hourouf' && sel){
+        const p = getPlanning(studentId);
+        if (sel.value) p.book_id = sel.value; else if (p.book_id) delete p.book_id;
+        const id = rbBookIdOf(p);
+        if (id !== 'alphabet'){
+          p.book_step = Number((document.getElementById('plBookStep')||{}).value)||0;
+          p.book_step_of = id;
+        }
+      }
+    } catch(e){}
+    return _sp.apply(this, arguments);
+  };
+})();
+
+
+/* =====================================================================
+   3) RESTITUTION HEBDOMADAIRE (réglage du fondateur : restitutionConfig)
+   Chaque leçon marquée « Maîtrisé » est ajoutée automatiquement à la
+   restitution et la leçon suivante est débloquée dès le lendemain : les
+   leçons s'accumulent jour après jour, dans l'ordre, et l'élève restitue
+   l'ensemble (nouvelles et anciennes leçons) le(s) jour(s) de restitution.
+   Désactivé : fonctionnement habituel (une leçon à la fois).
+   ===================================================================== */
+function rwOn(){ return !!(DB.restitutionConfig && DB.restitutionConfig.weekly === true); }
+function rwSaveCfg(on){
+  if (!isAdminOrAbove()){ toast('Réservé au fondateur / administrateur.'); return; }
+  DB.restitutionConfig = Object.assign({}, DB.restitutionConfig || {}, { weekly: !!on, updatedAt: Date.now() });
+  saveDB();
+  logAction('Restitution hebdomadaire', on ? 'Activée' : 'Désactivée');
+  toast(on ? '✅ Restitution hebdomadaire activée : les leçons maîtrisées s’accumulent jusqu’au jour de restitution.' : 'Restitution hebdomadaire désactivée (une leçon à la fois).');
+}
+function rwDaysLabel(){ const d = recitDays(); return d.length ? d.map(x=>trDay(x)).join(', ') : 'aucun jour choisi'; }
+function rwNextRecitLabel(){
+  if (!recitDays().length) return 'jour de restitution à choisir dans Réglages';
+  for (let k = 0; k < 8; k++){
+    const d = new Date(); d.setDate(d.getDate()+k);
+    const iso = oIso(d);
+    if (isRecitationDay(iso)) return k === 0 ? "aujourd'hui" : trDay(dayNameOf(iso)) + ' ' + oFr(iso);
+  }
+  return '—';
+}
+/** Dernier jour de restitution strictement avant aujourd'hui (sert à séparer « nouvelles » et « anciennes »). */
+function rwPrevRecitDate(){
+  if (!recitDays().length) return '';
+  for (let k = 1; k <= 14; k++){
+    const d = new Date(); d.setDate(d.getDate()-k);
+    const iso = oIso(d);
+    if (isRecitationDay(iso)) return iso;
+  }
+  return '';
+}
+function rwCanValidate(){ return isRecitationDay() || isAdminOrAbove(); }
+
+/** Ancienne leçon (révision) du jour, telle qu'affichée dans Lecture — mémorisée avec la leçon. */
+function rwOldOfDay(studentId, p){
+  if (p.level === 'hourouf') { const t = rbTxt(p, 'old'); return t && t !== '—' ? { label: t } : null; }
+  const ro = getDailyRange(studentId, 'old');
+  if (ro) return { label: `${SOURATES[ro.sourate-1][0]} ${ro.from}${ro.to>ro.from?'-'+ro.to:''}`, s: ro.sourate, from: ro.from, to: ro.to };
+  if (p.rev_ayah_from && p.rev_ayah_to){
+    const rs = p.rev_sourate || p.sourate;
+    return { label: `${SOURATES[rs-1][0]} ${p.rev_ayah_from}-${p.rev_ayah_to}`, s: rs, from: p.rev_ayah_from, to: p.rev_ayah_to };
+  }
+  const n = Math.max(0, Number(p.revision_per_day)||0);
+  if (!n) return null;
+  const pp = previousPortion(p, n);
+  return pp ? { label: `${SOURATES[pp.s-1][0]} ${pp.from}${pp.to>pp.from?'-'+pp.to:''}`, s: pp.s, from: pp.from, to: pp.to } : null;
+}
+
+/* ---- Lecture : « Maîtrisé » en mode hebdomadaire ---- */
+(function(){
+  if (window._agmORwHooked) return; window._agmORwHooked = true;
+  const _mm = markMastery;
+  markMastery = function(studentId, mastered){
+    if (!mastered || !rwOn()) return _mm.apply(this, arguments);
+    ensureExt();
+    if (isRecitationDay()){ toast('🎙️ Jour de restitution : aucune nouvelle leçon aujourd\'hui.'); return; }
+    const legacy = DB.lessons.find(l=>l.student_id===studentId && l.status==='pending' && !l.weekly);
+    if (legacy){ toast('Une leçon enregistrée avant la restitution hebdomadaire attend sa restitution : validez-la d’abord dans l’onglet Restitution.'); return; }
+    const already = DB.lessons.filter(l=>l.student_id===studentId && l.weekly && l.date===todayStr() && l.status==='pending');
+    if (already.length && !confirm('Une leçon a déjà été maîtrisée aujourd’hui par cet élève. Ajouter la leçon suivante à la restitution de la semaine ?')) return;
+    const p = getPlanning(studentId);
+    const quota = todayQuota(studentId);
+    const hourouf = p.level === 'hourouf';
+    const rangeNew = hourouf ? null : getDailyRange(studentId, 'new');
+    const port = (!hourouf && !rangeNew) ? portionInSourate(p.sourate, p.ayah, quota) : null;
+    const sourate = hourouf ? p.sourate : (rangeNew ? rangeNew.sourate : port.s);
+    const from    = hourouf ? null : (rangeNew ? rangeNew.from : port.from);
+    const to      = hourouf ? null : (rangeNew ? rangeNew.to   : port.to);
+    const label = hourouf ? rbTxt(p, 'lesson') : `${SOURATES[sourate-1][0]} ${from}${to>from?'-'+to:''}`;
+    const old = rwOldOfDay(studentId, p);
+
+    DB.masteryLog.push({ id:uid('ml'), student_id:studentId, date:todayStr(), label, level:p.level, mastered:true });
+    const lesson = Object.assign({ id:uid('ls'), student_id:studentId, date:todayStr(), level:p.level,
+      label, sourate: hourouf ? p.sourate : sourate,
+      ayah: hourouf ? p.ayah : (sourateOrderUp() ? to : from),
+      count: hourouf ? quota : (to-from+1),
+      hourouf_index: p.hourouf_index, juz: p.juz, status:'pending',
+      teacher_id: (myTeacher()||{}).id || null,
+      weekly: true, week_key: isoWeekKey(todayStr()) }, rbLessonExtra(p));
+    if (old){ lesson.old_label = old.label; if (old.s){ lesson.old_sourate = old.s; lesson.old_from = old.from; lesson.old_to = old.to; } }
+    DB.lessons.push(lesson);
+
+    // La leçon suivante est débloquée tout de suite (suite logique, jour après jour).
+    if (hourouf){
+      if (!rbAdvance(p)){ p.level = 'coran'; toast(rbDoneMsg(p)); }
+    } else {
+      const up = sourateOrderUp();
+      const total = SOURATES[sourate-1][1];
+      const finished = up ? (from <= 1) : (to >= total);
+      if (finished){
+        const nx = nextSourateStart(sourate);
+        p.sourate = nx.s; p.ayah = nx.a;
+        if (nx.finished) toast('🎉 Coran terminé — félicitations !');
+      } else {
+        p.sourate = sourate;
+        p.ayah = up ? (from - 1) : (to + 1);
+      }
+    }
+    clearDailyRange(studentId, 'new');
+    saveDB();
+    const nb = DB.lessons.filter(l=>l.student_id===studentId && l.weekly && l.status==='pending').length;
+    toast('✅ Maîtrisé : ' + label + ' — ajouté à la restitution (' + nb + ' leçon(s), restitution : ' + rwNextRecitLabel() + ').', 4000);
+    renderLecture();
+  };
+
+  const _vr = validateRecitation;
+  validateRecitation = function(lessonId, ok){
+    const l = DB.lessons.find(x=>x.id===lessonId);
+    if (l && l.weekly) return rwValidate(lessonId, ok);
+    return _vr.apply(this, arguments);
+  };
+
+  // Ouverture du texte à restituer : leçon d'un livre de lecture.
+  const _orp = openRecitationPage;
+  openRecitationPage = async function(lessonId){
+    const l = DB.lessons.find(x=>x.id===lessonId);
+    if (l && l.level === 'hourouf' && l.book_id){ rbOpenLessonSheet(l, DB.students.find(x=>x.id===l.student_id)||{}); return; }
+    return _orp.apply(this, arguments);
+  };
+})();
+
+/** Progression du djouzou (même règle que la validation habituelle). */
+function rwJuz(l){
+  if (l.level === 'hourouf') return;
+  const p = getPlanning(l.student_id);
+  const s = DB.students.find(x=>x.id===l.student_id);
+  const totalDone = DB.recitations.filter(r=>r.student_id===l.student_id && r.ok).length;
+  const versetsDone = totalDone * Number(p.versets_per_day||1);
+  const stepDone = Math.min(30, 1 + Math.floor(versetsDone/200));
+  const juzCalc = sourateOrderUp() ? (31 - stepDone) : stepDone;
+  const curStep = juzStep(p.juz||firstJuz());
+  if (s && stepDone > curStep){
+    const prevJuz = p.juz;
+    p.juz = juzCalc; s.current_juz = juzCalc;
+    if (!Array.isArray(s.memorized_juz)) s.memorized_juz = [];
+    if (prevJuz>=1 && prevJuz<=30 && !s.memorized_juz.includes(prevJuz)){
+      s.memorized_juz.push(prevJuz);
+      toast('🎉 Djouzou '+prevJuz+' validé — passage au djouzou '+juzCalc);
+    }
+  }
+}
+/** Validation d'une leçon de la semaine. « À reprendre » : la leçon reste à restituer la prochaine fois. */
+function rwValidate(lessonId, ok, silent){
+  ensureExt();
+  if (!rwCanValidate()){ toast('🎙️ La restitution se fait le ' + rwDaysLabel() + '.'); return; }
+  const l = DB.lessons.find(x=>x.id===lessonId); if (!l || l.status !== 'pending') return;
+  DB.recitations.push({ id:uid('rc'), student_id:l.student_id, lesson_id:l.id, label:l.label, date:todayStr(), ok:!!ok, weekly:true });
+  if (ok){ l.status = 'validated'; l.validated_at = todayStr(); rwJuz(l); }
+  else { l.repeat = (Number(l.repeat)||0) + 1; l.last_repeat = todayStr(); }
+  if (!silent){
+    saveDB();
+    toast(ok ? '✅ Restitution validée : ' + l.label : '↩️ À reprendre : ' + l.label + ' — elle reste dans la prochaine restitution.');
+    renderRestitution();
+  }
+}
+function rwValidateAll(studentId){
+  if (!rwCanValidate()){ toast('🎙️ La restitution se fait le ' + rwDaysLabel() + '.'); return; }
+  const me = myTeacher();
+  const list = DB.lessons.filter(l=>l.student_id===studentId && l.weekly && l.status==='pending')
+    .filter(l=>!me || l.teacher_id===me.id || !l.teacher_id);
+  if (!list.length) return;
+  const s = DB.students.find(x=>x.id===studentId)||{};
+  if (!confirm('Valider la restitution complète de ' + (s.first_name||'') + ' (' + list.length + ' leçon(s)) ?')) return;
+  list.sort((a,b)=>(a.date||'').localeCompare(b.date||'')).forEach(l=>rwValidate(l.id, true, true));
+  saveDB();
+  toast('✅ ' + list.length + ' leçon(s) restituée(s) et validée(s).');
+  renderRestitution();
+}
+async function rwOpenOld(lessonId){
+  const l = DB.lessons.find(x=>x.id===lessonId); if (!l || !l.old_sourate) return;
+  const s = DB.students.find(x=>x.id===l.student_id)||{};
+  const total = SOURATES[l.old_sourate-1][1];
+  await openQuranPage({ s:l.old_sourate, from:l.old_from, to:l.old_to, count:(l.old_to-l.old_from+1), clamped:false, total }, 'Ancienne leçon — à restituer', s);
+}
+
+/** Section « Restitution de la semaine » (cartes par élève, lisibles sur téléphone). */
+function rwSectionHtml(me){
+  ensureExt();
+  const items = DB.lessons.filter(l=>l.status==='pending' && l.weekly)
+    .filter(l=>!me || l.teacher_id===me.id || !l.teacher_id);
+  if (!rwOn() && !items.length) return '';
+  const recit = isRecitationDay();
+  const canVal = rwCanValidate();
+  const prev = rwPrevRecitDate();
+  const by = {};
+  items.forEach(l=>{ (by[l.student_id] = by[l.student_id] || []).push(l); });
+  const sids = Object.keys(by).sort((a,b)=>{
+    const sa = DB.students.find(x=>x.id===a)||{}, sb = DB.students.find(x=>x.id===b)||{};
+    return ((sa.first_name||'')+(sa.last_name||'')).localeCompare((sb.first_name||'')+(sb.last_name||''));
+  });
+  const dayLbl = d => { try { return trDay(dayNameOf(d)) + ' ' + oFr(d); } catch(e){ return oFr(d); } };
+  const itemRow = l => `<div style="border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:6px;background:var(--panel)">
+      <div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)">
+        <span>📅 ${esc(dayLbl(l.date))}</span>${l.repeat?`<span class="badge badge-red">↩️ à reprendre ×${Number(l.repeat)}</span>`:''}</div>
+      <div style="margin-top:3px"><span class="lesson-link" onclick="openRecitationPage('${l.id}')">📗 <b>${esc(l.label)}</b> 📖</span></div>
+      ${l.old_label?`<div style="font-size:12px;margin-top:2px">${l.old_sourate?`<span class="lesson-link" onclick="rwOpenOld('${l.id}')">📘 Ancienne : ${esc(l.old_label)} 📖</span>`:`📘 Ancienne : ${esc(l.old_label)}`}</div>`:''}
+      ${canVal?`<div style="display:flex;gap:6px;margin-top:7px">
+        <button class="fb fb-green fb-sm" style="flex:1" onclick="validateRecitation('${l.id}',true)">✅ Validé</button>
+        <button class="fb fb-danger fb-sm" style="flex:1" onclick="validateRecitation('${l.id}',false)">↩️ À reprendre</button></div>`:''}
+    </div>`;
+  const cards = sids.map(sid=>{
+    const s = DB.students.find(x=>x.id===sid)||{};
+    if (s.status === 'non_actif') return '';
+    const list = by[sid].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+    const fresh = list.filter(l=>!l.repeat && (!prev || l.date > prev));
+    const older = list.filter(l=>!fresh.includes(l));
+    return `<div class="card" style="margin-bottom:10px;padding:12px 13px">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:9px;min-width:0">${photoThumb(s,34)}<div style="min-width:0"><b>${esc((s.first_name||'')+' '+(s.last_name||''))}</b>
+          <div style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace">${esc(s.matricule||'')}</div></div></div>
+        <span class="badge badge-gold">${list.length} leçon(s) à restituer</span>
+      </div>
+      ${fresh.length?`<div class="fl" style="margin:10px 0 6px">🆕 Nouvelles leçons de la semaine (${fresh.length})</div>${fresh.map(itemRow).join('')}`:''}
+      ${older.length?`<div class="fl" style="margin:10px 0 6px">🔁 Anciennes leçons à restituer (${older.length})</div>${older.map(itemRow).join('')}`:''}
+      ${canVal && list.length>1?`<button class="fb fb-green" style="width:100%;margin-top:4px" onclick="rwValidateAll('${sid}')">✅ Tout valider (${list.length})</button>`:''}
+    </div>`;
+  }).join('');
+  return `<div class="card" style="margin-bottom:12px;border-left:4px solid var(--gold)">
+      <b>🔁 Restitution hebdomadaire${rwOn()?'':' (leçons restantes)'}</b>
+      <div style="font-size:12.5px;color:var(--muted);margin-top:4px">Chaque leçon maîtrisée s'ajoute ici automatiquement, jour après jour. Jour(s) de restitution : <b>${esc(rwDaysLabel())}</b> —
+        ${recit?'<b style="color:var(--brand)">aujourd’hui est jour de restitution</b>':'prochaine restitution : <b>'+esc(rwNextRecitLabel())+'</b>'}.</div>
+      ${!recit && canVal?'<div style="font-size:11.5px;color:var(--muted);margin-top:4px">En dehors du jour de restitution, seuls le fondateur et l’administrateur peuvent valider.</div>':''}
+    </div>
+    ${cards || `<div class="table-wrap" style="margin-bottom:14px"><div class="empty-state"><div class="em">🔁</div>Aucune leçon accumulée pour l'instant : elles s'ajoutent dès qu'une leçon est marquée « Maîtrisé » dans Lecture.</div></div>`}`;
+}
+
+/* ---- Lecture : rappel du livre utilisé et du mode de restitution ---- */
+(function(){
+  if (window._agmOLectHooked) return; window._agmOLectHooked = true;
+  const _rl = renderLecture;
+  renderLecture = function(){
+    const r = _rl.apply(this, arguments);
+    try {
+      const head = document.querySelector('#pageContent .page-head');
+      if (head && !document.getElementById('oLectInfo')){
+        const me = myTeacher();
+        const hasH = visibleStudents().some(s=>(!me || s.teacher_id===me.id) && getPlanning(s.id).level==='hourouf');
+        const b = rbBook(rbCfg().book);
+        const parts = [];
+        if (hasH || isAdminOrAbove()) parts.push(`📘 Livre des élèves Hourouf : <b>${esc(b.name)}</b>${isAdminOrAbove()?` <button class="fb fb-ghost fb-sm" style="margin-left:6px" onclick="rbOpenConfig()">⚙️ Changer</button>`:''}`);
+        if (rwOn()) parts.push(`🔁 Restitution hebdomadaire : chaque leçon maîtrisée est ajoutée automatiquement à la restitution (${esc(rwDaysLabel())}) et la leçon suivante est débloquée tout de suite.`);
+        if (parts.length){
+          const d = document.createElement('div'); d.id = 'oLectInfo'; d.className = 'card';
+          d.style.cssText = 'margin-bottom:14px;font-size:12.5px;display:flex;flex-direction:column;gap:6px';
+          d.innerHTML = parts.map(x=>`<div>${x}</div>`).join('');
+          head.parentNode.insertBefore(d, head.nextSibling);
+        }
+      }
+    } catch(e){}
+    return r;
+  };
+})();
+
+
+/* =====================================================================
+   4) ÉVALUATIONS — critères choisis par le fondateur (clé evalConfig)
+   + classements séparés : Internat d'un côté, Externat de l'autre.
+   Sans réglage : les 6 critères habituels, coefficient 1 (inchangé).
+   ===================================================================== */
+const EV_BUILTIN = [
+  { id:'memorization', label:'Mémorisation' }, { id:'tajwid', label:'Tajwid' },
+  { id:'pronunciation', label:'Prononciation' }, { id:'revision', label:'Révision' },
+  { id:'discipline', label:'Discipline' }, { id:'attendance', label:'Assiduité' }
+];
+let EV_CAT = 'all';          // filtre d'affichage : all | internat | externat
+function evIsBuiltin(id){ return EV_BUILTIN.some(b=>b.id===id); }
+function evCustomized(){ return !!(DB.evalConfig && nArr(DB.evalConfig.criteria).length); }
+function evCriteriaAll(){
+  if (!evCustomized()) return EV_BUILTIN.map(b=>({ id:b.id, label:b.label, coef:1, active:true, builtin:true }));
+  return nArr(DB.evalConfig.criteria).filter(c=>c && c.id).map(c=>({
+    id:String(c.id), label:String(c.label||c.id), coef:Math.max(1, Math.min(10, Math.round(nNum(c.coef,1)))),
+    active:c.active!==false, builtin:evIsBuiltin(String(c.id)) }));
+}
+function evActive(){ const a = evCriteriaAll().filter(c=>c.active); return a.length ? a : evCriteriaAll().slice(0,1); }
+function evVal(ev, c){
+  if (!ev) return null;
+  const v = c.builtin ? ev[c.id] : (ev.scores||{})[c.id];
+  return (v===undefined || v===null || v==='') ? null : Number(v);
+}
+function evCell(ev, c){ const v = evVal(ev, c); return v===null ? '—' : v; }
+function evHead(c){ const m = { memorization:'Mémo.', pronunciation:'Pronon.' }; return (c.builtin && m[c.id] && c.label===(EV_BUILTIN.find(b=>b.id===c.id)||{}).label) ? m[c.id] : c.label; }
+function evIsInt(s){ return s && s.category === 'internat'; }
+function evCats(){ return EV_CAT==='internat' ? ['internat'] : EV_CAT==='externat' ? ['externat'] : ['internat','externat']; }
+function evCatTitle(cat){ return cat==='internat' ? '🏠 Internat' : '🚶 Externat'; }
+function evInCat(s, cat){ return cat==='internat' ? evIsInt(s) : !evIsInt(s); }
+function evRank(list){ let rank = 0, last = null; list.forEach((r,i)=>{ if (r.ev.average !== last){ rank = i+1; last = r.ev.average; } r.rank = rank; }); return list; }
+function evCatSelect(onchange){
+  return `<select class="fi" style="max-width:190px" onchange="EV_CAT=this.value;${onchange}">
+    <option value="all" ${EV_CAT==='all'?'selected':''}>Internat et Externat (séparés)</option>
+    <option value="internat" ${EV_CAT==='internat'?'selected':''}>🏠 Internat seulement</option>
+    <option value="externat" ${EV_CAT==='externat'?'selected':''}>🚶 Externat seulement</option></select>`;
+}
+
+/* ---- Onglet Évaluations : un classement par catégorie ---- */
+renderEvaluations = function(){
+  const students = visibleStudents();
+  const evals = DB.evaluations.filter(e => e.year===evalPeriod.y && e.month===evalPeriod.m);
+  const crit = evActive();
+  const section = cat => {
+    const studs = students.filter(s=>evInCat(s, cat));
+    const ranked = evRank(studs.map(s=>({ s, ev: evals.find(e=>e.student_id===s.id) })).filter(r=>r.ev)
+      .sort((a,b)=>b.ev.average-a.ev.average));
+    const moy = ranked.length ? ranked.reduce((a,r)=>a+r.ev.average,0)/ranked.length : 0;
+    const rows = ranked.map(r=>`<tr>
+      <td><b>${r.rank}</b></td>
+      <td><div style="display:flex;align-items:center;gap:9px">${photoThumb(r.s,34)}<span>${esc(r.s.first_name+' '+r.s.last_name)}</span></div></td>
+      <td>${r.ev.average.toFixed(2)}/20</td>
+      <td>${mentionBadge(r.ev.mention)}</td>
+      <td style="text-align:right"><button class="fb fb-ghost fb-sm" onclick="openEvalForm('${r.s.id}')">✏️ Modifier</button></td>
+    </tr>`).join('');
+    const noEval = studs.filter(s=>!evals.find(e=>e.student_id===s.id));
+    return `<div class="card" style="margin:14px 0 10px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center">
+        <b>${evCatTitle(cat)} — classement</b>
+        <span style="font-size:12px;color:var(--muted)">${ranked.length} évalué(s) sur ${studs.length} · moyenne : <b>${moy.toFixed(2)}/20</b></span></div>
+      <div class="table-wrap">
+        ${rows ? `<table><thead><tr><th>#</th><th>Élève</th><th>Moyenne</th><th>Mention</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+        : `<div class="empty-state"><div class="em">🏆</div>Aucune évaluation ${cat==='internat'?"à l'internat":"à l'externat"} pour cette période.</div>`}
+      </div>
+      ${noEval.length ? `<div class="card" style="margin-top:10px">
+        <b>${noEval.length} élève(s) de ${cat==='internat'?"l'internat":"l'externat"} sans évaluation ce mois-ci</b>
+        <div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:8px">
+          ${noEval.map(s=>`<button class="fb fb-gold fb-sm" onclick="openEvalForm('${s.id}')">+ ${esc(s.first_name+' '+s.last_name)}</button>`).join('')}
+        </div></div>` : ''}`;
+  };
+  const yearOpts = yearRangeOptions(evalPeriod.y);
+  const monthOpts = Array.from({length:12},(_,i)=>i+1).map(m=>`<option value="${m}" ${m===evalPeriod.m?'selected':''}>${monthLabel(m)}</option>`).join('');
+  document.getElementById('pageContent').innerHTML = `
+    ${pageHead('Classement & évaluations', 'Moyenne sur ' + crit.length + ' critère(s) /20 — classements Internat et Externat séparés',
+      (isAdminOrAbove()?`<button class="fb fb-ghost" onclick="evOpenConfig()">⚙️ Critères</button> `:'') + printBtn('printMerite()','Imprimer le classement'))}
+    <div class="search-bar" style="gap:8px;flex-wrap:wrap">
+      <select class="fi" style="max-width:180px" onchange="evalPeriod.m=Number(this.value);renderEvaluations()">${monthOpts}</select>
+      <select class="fi" style="max-width:120px" onchange="evalPeriod.y=Number(this.value);renderEvaluations()">${yearOpts}</select>
+      ${evCatSelect('renderEvaluations()')}
+    </div>
+    ${evCats().map(section).join('')}`;
+};
+
+/* ---- Formulaire avec les critères choisis ---- */
+(function(){
+  if (window._agmOEvalHooked) return; window._agmOEvalHooked = true;
+  const _oef = openEvalForm, _uep = updateEvalPreview, _se = saveEval;
+  openEvalForm = function(studentId){
+    if (!evCustomized()) return _oef.apply(this, arguments);
+    const s = DB.students.find(x=>x.id===studentId); if (!s) return;
+    const existing = DB.evaluations.find(e=>e.student_id===studentId && e.year===evalPeriod.y && e.month===evalPeriod.m);
+    const crit = evActive();
+    const inputs = crit.map((c,i)=>{ const v = evVal(existing, c);
+      return `<div class="fg"><label class="fl">${esc(c.label)}${c.coef>1?` <span style="color:var(--muted)">(coef ${c.coef})</span>`:''}</label>
+        <input class="fi" type="number" min="0" max="20" step="0.5" id="evc_${i}" value="${v===null?15:v}" oninput="updateEvalPreview()"></div>`; });
+    const rows = []; for (let i = 0; i < inputs.length; i += 3) rows.push(`<div class="fg3">${inputs.slice(i,i+3).join('')}</div>`);
+    openModal(`
+      <h3>Évaluation — ${esc(s.first_name+' '+s.last_name)}</h3>
+      <p style="color:var(--muted);font-size:12.5px;margin-bottom:14px">${monthLabel(evalPeriod.m)} ${evalPeriod.y} — ${s.category==='internat'?'Internat':'Externat'} — chaque critère sur 20</p>
+      ${rows.join('')}
+      <div class="card" style="text-align:center;margin-bottom:6px">
+        <div class="fl">Moyenne${crit.some(c=>c.coef>1)?' (pondérée)':''}</div>
+        <div id="evalPreview" style="font-size:26px;font-weight:800;color:var(--gold-light)">—</div>
+      </div>
+      <input type="hidden" id="evStudentId" value="${studentId}">
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button class="fb fb-gold" style="flex:1" onclick="saveEval()">💾 Enregistrer</button>
+        <button class="fb fb-ghost" onclick="closeModal()">Annuler</button>
+      </div>`);
+    updateEvalPreview();
+  };
+  const read = () => evActive().map((c,i)=>{ const el = document.getElementById('evc_'+i);
+    return { c, v: Math.max(0, Math.min(20, Number(el && el.value)||0)) }; });
+  const avgOf = vals => { let t = 0, w = 0; vals.forEach(x=>{ t += x.v * x.c.coef; w += x.c.coef; }); return w ? t / w : 0; };
+  updateEvalPreview = function(){
+    if (!document.getElementById('evc_0')) return _uep.apply(this, arguments);
+    const avg = avgOf(read());
+    const el = document.getElementById('evalPreview'); if (el) el.textContent = avg.toFixed(2) + '/20 — ' + computeMention(avg);
+  };
+  saveEval = function(){
+    if (!document.getElementById('evc_0')) return _se.apply(this, arguments);
+    const studentId = document.getElementById('evStudentId').value;
+    const vals = read();
+    const average = avgOf(vals);
+    const mention = computeMention(average);
+    let ev = DB.evaluations.find(e=>e.student_id===studentId && e.year===evalPeriod.y && e.month===evalPeriod.m);
+    if (!ev){ ev = { id: uid('ev'), student_id: studentId, year: evalPeriod.y, month: evalPeriod.m }; DB.evaluations.push(ev); }
+    const scores = Object.assign({}, ev.scores || {});
+    vals.forEach(x=>{ if (x.c.builtin) ev[x.c.id] = x.v; else scores[x.c.id] = x.v; });
+    if (Object.keys(scores).length) ev.scores = scores;
+    ev.crit = vals.map(x=>({ id:x.c.id, label:x.c.label, coef:x.c.coef }));
+    ev.average = average; ev.mention = mention;
+    saveDB(); closeModal();
+    toast('Évaluation enregistrée : ' + average.toFixed(2) + '/20');
+    renderEvaluations();
+  };
+})();
+
+/* ---- Fenêtre du fondateur : critères d'évaluation ---- */
+let EV_EDIT = null;
+function evOpenConfig(){
+  if (!isAdminOrAbove()){ toast('Réservé au fondateur / administrateur.'); return; }
+  EV_EDIT = evCriteriaAll().map(c=>({ id:c.id, label:c.label, coef:c.coef, active:c.active, builtin:c.builtin }));
+  evRenderConfig();
+}
+function evCollect(){
+  (EV_EDIT||[]).forEach((c,i)=>{
+    const a = document.getElementById('evA_'+i), l = document.getElementById('evL_'+i), k = document.getElementById('evK_'+i);
+    if (a) c.active = !!a.checked;
+    if (l) c.label = l.value.trim() || c.label;
+    if (k) c.coef = Math.max(1, Math.min(10, Math.round(Number(k.value)||1)));
+  });
+}
+function evRenderConfig(){
+  const E = EV_EDIT || [];
+  openModal(`
+    <h3 style="margin:0 0 4px">📝 Critères d'évaluation</h3>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">Choisissez les éléments sur lesquels les élèves sont évalués (chaque note sur 20). La moyenne tient compte des coefficients. Les évaluations déjà enregistrées gardent leur moyenne.</p>
+    ${E.map((c,i)=>`<div style="border:1px solid var(--line);border-left:4px solid ${c.active?'var(--brand)':'var(--line)'};border-radius:11px;padding:10px 11px;margin-bottom:8px;background:var(--panel)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <label style="display:flex;gap:8px;align-items:center;font-weight:700"><input type="checkbox" id="evA_${i}" ${c.active?'checked':''}> Utiliser ce critère</label>
+        ${c.builtin?'<span class="badge badge-slate">d’origine</span>':`<button class="fb fb-danger fb-sm" onclick="evDel(${i})">✖</button>`}
+      </div>
+      <div class="fg2" style="margin-top:8px">
+        <div class="fg" style="margin-bottom:0"><label class="fl">Nom du critère</label><input class="fi" id="evL_${i}" value="${esc(c.label)}"></div>
+        <div class="fg" style="margin-bottom:0"><label class="fl">Coefficient</label><select class="fi" id="evK_${i}">${[1,2,3,4,5].map(n=>`<option value="${n}" ${c.coef===n?'selected':''}>${n}</option>`).join('')}</select></div>
+      </div></div>`).join('')}
+    <div style="display:flex;gap:6px;margin:4px 0 12px"><input class="fi" id="evNew" placeholder="Nouveau critère (ex. Comportement, Écriture, Hygiène…)">
+      <button class="fb fb-ghost" onclick="evAdd()">+ Ajouter</button></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="fb fb-gold" style="flex:1" onclick="evSaveConfig()">💾 Enregistrer</button>
+      <button class="fb fb-ghost" onclick="evResetConfig()">↺ 6 critères d'origine</button>
+      <button class="fb fb-ghost" onclick="closeModal()">Annuler</button>
+    </div>`);
+}
+function evAdd(){
+  evCollect();
+  const n = ((document.getElementById('evNew')||{}).value||'').trim();
+  if (!n){ toast('Saisissez le nom du nouveau critère.'); return; }
+  EV_EDIT.push({ id: uid('crit'), label:n, coef:1, active:true, builtin:false });
+  evRenderConfig();
+}
+function evDel(i){ evCollect(); EV_EDIT.splice(i,1); evRenderConfig(); }
+function evResetConfig(){ EV_EDIT = EV_BUILTIN.map(b=>({ id:b.id, label:b.label, coef:1, active:true, builtin:true })); evRenderConfig(); }
+function evSaveConfig(){
+  if (!isAdminOrAbove()) return;
+  evCollect();
+  if (!EV_EDIT.some(c=>c.active)){ toast('Gardez au moins un critère actif.'); return; }
+  const isDefault = EV_EDIT.length === EV_BUILTIN.length && EV_EDIT.every((c,i)=>c.builtin && c.id===EV_BUILTIN[i].id && c.active && c.coef===1 && c.label===EV_BUILTIN[i].label);
+  if (isDefault) delete DB.evalConfig;
+  else DB.evalConfig = { criteria: EV_EDIT.map(c=>({ id:c.id, label:c.label, coef:c.coef, active:c.active })), updatedAt: Date.now() };
+  saveDB();
+  logAction("Critères d'évaluation", EV_EDIT.filter(c=>c.active).map(c=>c.label+(c.coef>1?' ×'+c.coef:'')).join(', '));
+  closeModal();
+  toast("✅ Critères d'évaluation enregistrés.");
+  if (currentPage==='evaluations') renderEvaluations(); else if (currentPage==='settings') renderSettings(); else if (currentPage==='results') renderResults();
+}
+
+/* ---- Impression du classement : une partie Internat, une partie Externat ---- */
+printMerite = function(){
+  ensureExt();
+  const students = visibleStudents();
+  const evals = DB.evaluations.filter(e=>e.year===evalPeriod.y && e.month===evalPeriod.m);
+  const crit = evActive();
+  const body = evCats().map(cat=>{
+    const ranked = evRank(students.filter(s=>evInCat(s,cat)).map(s=>({s,ev:evals.find(e=>e.student_id===s.id)})).filter(r=>r.ev)
+      .sort((a,b)=>b.ev.average-a.ev.average));
+    return `<div class="sec">${cat==='internat'?'Internat':'Externat'} — classement par ordre de mérite</div>`
+      + a4Table(['Rang','Élève','Matricule'].concat(crit.map(evHead)).concat(['Moyenne','Mention']),
+        ranked.map(r=>[`<b>${r.rank}</b>`, esc(r.s.first_name+' '+r.s.last_name), esc(r.s.matricule)]
+          .concat(crit.map(c=>evCell(r.ev,c))).concat([`<b>${r.ev.average.toFixed(2)}</b>`, esc(r.ev.mention||'')])));
+  }).join('');
+  printA4("Classement par ordre de mérite", body,
+    { subtitle: monthLabel(evalPeriod.m)+' '+evalPeriod.y, sgLeft:"L'enseignant", sgRight:'La direction' });
+};
+
+/* ---- Onglet Résultats : classements séparés ---- */
+rankedResults = function(y, m, cat){
+  const evals = DB.evaluations.filter(e=>e.year===y && e.month===m);
+  const rows = DB.students.filter(s=>s.status!=='non_actif' && (!cat || evInCat(s, cat)))
+    .map(s=>({ s, ev: evals.find(e=>e.student_id===s.id) }))
+    .filter(r=>r.ev)
+    .sort((a,b)=>b.ev.average - a.ev.average);
+  return evRank(rows);
+};
+renderResults = function(){
+  ensureExt();
+  const crit = evActive();
+  const mOpts = Array.from({length:12},(_,i)=>i+1)
+    .map(m=>`<option value="${m}" ${m===resultPeriod.m?'selected':''}>${monthLabel(m)}</option>`).join('');
+  const yOpts = yearRangeOptions(resultPeriod.y);
+  const section = cat => {
+    const rows = rankedResults(resultPeriod.y, resultPeriod.m, cat);
+    const moy = rows.length ? (rows.reduce((a,r)=>a+r.ev.average,0)/rows.length) : 0;
+    return `<div class="card" style="margin:14px 0 10px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center">
+        <b>${evCatTitle(cat)} — résultats</b>
+        <span style="font-size:12px;color:var(--muted)">${rows.length} élève(s) évalué(s) · moyenne : <b>${moy.toFixed(2)}/20</b></span></div>
+      <div class="table-wrap">
+      ${rows.length?`<table>
+        <thead><tr><th>Rang</th><th>Élève</th><th>Matricule</th>${crit.map(c=>`<th>${esc(evHead(c))}</th>`).join('')}<th>Moyenne</th><th>Mention</th></tr></thead>
+        <tbody>${rows.map(r=>{
+          const e = r.ev;
+          const medal = r.rank===1?'🥇':r.rank===2?'🥈':r.rank===3?'🥉':'';
+          return `<tr>
+            <td><b>${medal} ${r.rank}</b></td>
+            <td><div style="display:flex;align-items:center;gap:9px">${photoThumb(r.s,32)}<span>${esc(r.s.first_name+' '+r.s.last_name)}</span></div></td>
+            <td style="font-family:'DM Mono',monospace">${esc(r.s.matricule)}</td>
+            ${crit.map(c=>`<td>${evCell(e,c)}</td>`).join('')}
+            <td><b>${e.average.toFixed(2)}</b></td>
+            <td><span class="badge badge-green">${esc(e.mention||'')}</span></td>
+          </tr>`;}).join('')}</tbody></table>`
+      :`<div class="empty-state"><div class="em">🏆</div>Aucune évaluation ${cat==='internat'?"à l'internat":"à l'externat"} pour ${monthLabel(resultPeriod.m)} ${resultPeriod.y}.</div>`}
+      </div>`;
+  };
+  document.getElementById('pageContent').innerHTML = `
+    ${pageHead('Résultats', 'Classements par ordre de mérite — Internat et Externat séparés',
+      printBtn('printResults()','Imprimer les résultats'))}
+    <div class="search-bar" style="gap:8px;flex-wrap:wrap">
+      <select class="fi" style="max-width:160px" onchange="resultPeriod.m=Number(this.value);renderResults()">${mOpts}</select>
+      <select class="fi" style="max-width:120px" onchange="resultPeriod.y=Number(this.value);renderResults()">${yOpts}</select>
+      ${evCatSelect('renderResults()')}
+    </div>
+    ${evCats().map(section).join('')}`;
+};
+printResults = function(){
+  ensureExt();
+  const crit = evActive();
+  const body = evCats().map(cat=>{
+    const rows = rankedResults(resultPeriod.y, resultPeriod.m, cat);
+    const moy = rows.length ? (rows.reduce((a,r)=>a+r.ev.average,0)/rows.length) : 0;
+    return `<div class="sec">${cat==='internat'?'Internat':'Externat'}</div>`
+      + a4Kpis([{l:'Élèves évalués',v:rows.length},{l:'Moyenne',v:moy.toFixed(2)+'/20'},
+                {l:'Meilleure moyenne',v:rows.length?rows[0].ev.average.toFixed(2)+'/20':'—'}])
+      + a4Table(['Rang','Élève','Matricule'].concat(crit.map(evHead)).concat(['Moyenne','Mention']),
+        rows.map(r=>[`<b>${r.rank}</b>`, esc(r.s.first_name+' '+r.s.last_name), esc(r.s.matricule)]
+          .concat(crit.map(c=>evCell(r.ev,c))).concat([`<b>${r.ev.average.toFixed(2)}</b>`, esc(r.ev.mention||'')])));
+  }).join('');
+  printA4('Résultats — classement par ordre de mérite', body,
+    { subtitle: monthLabel(resultPeriod.m)+' '+resultPeriod.y, sgLeft:"L'enseignant", sgRight:'La direction' });
+};
+/** Rapport non financier : classement de mérite par catégorie. */
+function evMeritA4(ranked){
+  const part = (cat, title) => {
+    const list = evRank(ranked.filter(r=>evInCat(r.s, cat)).map(r=>({ s:r.s, ev:r.ev })));
+    return `<div class="sec">${title}</div>` + a4Table(['Rang','Élève','Matricule','Moyenne','Mention'],
+      list.map(r=>[`<b>${r.rank}</b>`, esc(r.s.first_name+' '+r.s.last_name), esc(r.s.matricule),
+        r.ev.average.toFixed(2)+'/20', esc(r.ev.mention||'')]));
+  };
+  return part('internat', 'Classement par ordre de mérite — Internat') + part('externat', 'Classement par ordre de mérite — Externat');
+}
+
+
+/* =====================================================================
+   5) WHATSAPP — ENVOI DIRECT DEPUIS LE NUMÉRO CONNECTÉ DU MARKAZ
+   Le numéro WhatsApp du markaz est relié une fois (code de liaison ou
+   QR code) à une instance Green-API (clé facultative waGateway). Tant
+   qu'il est connecté, rappels de mensualité, relances de dettes et
+   confirmations de paiement partent automatiquement de ce numéro.
+   Non connecté (ou passerelle injoignable) : la méthode actuelle reste
+   utilisée (message prêt, WhatsApp s'ouvre, l'opérateur appuie sur ➤).
+   ===================================================================== */
+const WG = { state:'', at:0, phone:'', err:'' };
+let WG_RUN = null, WG_POLL = null;
+function wgCfg(){
+  const g = DB.waGateway || {};
+  return { apiUrl: String(g.apiUrl || 'https://api.green-api.com').trim().replace(/\/+$/,''),
+           idInstance: String(g.idInstance || '').replace(/\s/g,''), apiToken: String(g.apiToken || '').trim(),
+           active: g.active !== false, auto: g.auto !== false, phone: String(g.phone || '') };
+}
+function wgConfigured(){ const g = wgCfg(); return !!(g.idInstance && g.apiToken && g.active); }
+function wgAutoWanted(){ return wgConfigured() && wgCfg().auto; }
+/** Prêt à envoyer : connecté lors de la dernière vérification (moins de 10 min). */
+function wgReady(){ return wgConfigured() && WG.state === 'authorized' && (Date.now() - WG.at) < 600000; }
+function wgUrl(method){ const g = wgCfg(); return g.apiUrl + '/waInstance' + encodeURIComponent(g.idInstance) + '/' + method + '/' + encodeURIComponent(g.apiToken); }
+async function wgCall(method, body, ms){
+  const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const t = ctl ? setTimeout(()=>ctl.abort(), ms || 20000) : null;
+  try {
+    const opt = body !== undefined
+      ? { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body) }
+      : { method:'GET' };
+    if (ctl) opt.signal = ctl.signal;
+    const r = await fetch(wgUrl(method), opt);
+    const txt = await r.text();
+    let j; try { j = txt ? JSON.parse(txt) : {}; } catch(e){ j = { raw: txt }; }
+    if (!r.ok){ const e = new Error((j && (j.message || j.error)) || ('Erreur ' + r.status)); e.status = r.status; throw e; }
+    return j || {};
+  } catch(e){
+    if (e && e.name === 'AbortError') throw new Error('délai dépassé');
+    if (e && e.name === 'TypeError') throw new Error('connexion impossible (internet ou adresse apiUrl)');
+    throw e;
+  } finally { if (t) clearTimeout(t); }
+}
+async function wgRefresh(force){
+  if (!wgConfigured()){ WG.state = ''; return ''; }
+  if (!force && WG.at && (Date.now() - WG.at) < 120000) return WG.state;
+  try {
+    const j = await wgCall('getStateInstance', undefined, 15000);
+    WG.state = String(j.stateInstance || ''); WG.err = '';
+    if (WG.state === 'authorized' && !WG.phone){
+      try { const w = await wgCall('getWaSettings', undefined, 15000); WG.phone = String(w.phone || '').replace(/\D/g,''); } catch(e){}
+      if (WG.phone && DB.waGateway && DB.waGateway.phone !== WG.phone){ DB.waGateway.phone = WG.phone; saveDB(); }
+    }
+  } catch(e){ WG.state = 'error'; WG.err = String((e && e.message) || e); }
+  WG.at = Date.now();
+  try { wgPaintPage(); } catch(e){}
+  return WG.state;
+}
+async function wgSend(phone, text){
+  const chatId = String(phone).replace(/\D/g,'') + '@c.us';
+  const j = await wgCall('sendMessage', { chatId, message: text }, 25000);
+  if (!j || !j.idMessage) throw new Error('réponse inattendue de la passerelle');
+  return j.idMessage;
+}
+async function wgSendLogged(key, entry, phone, text){
+  try {
+    const id = await wgSend(phone, text);
+    waLogSet(key, Object.assign({}, entry, { p: phone, s:'ok', e:'', id, via:'direct' }));
+    return true;
+  } catch(e){
+    waLogSet(key, Object.assign({}, entry, { p: phone, s:'fail', e: String((e && e.message) || e).slice(0,140), via:'direct' }));
+    WG.at = 0;                                   // nouvelle vérification de l'état au prochain envoi
+    return false;
+  }
+}
+
+/* ---- Envoi automatique de la liste du jour (un message toutes les 3 à 6 s) ---- */
+function wgBanner(it, done){
+  let b = document.getElementById('wgRunBanner');
+  if (!WG_RUN && !done){ if (b) b.remove(); return; }
+  if (!b){
+    b = document.createElement('div'); b.id = 'wgRunBanner';
+    b.style.cssText = 'position:fixed;left:50%;bottom:70px;transform:translateX(-50%);z-index:9997;background:#fff;color:#14261b;border:2px solid #16a34a;border-radius:12px;padding:12px 14px;box-shadow:0 10px 28px rgba(0,0,0,.3);max-width:92vw;width:390px;font-size:13px';
+    document.body.appendChild(b);
+  }
+  if (done){
+    b.innerHTML = `<b>📲 Envoi direct terminé</b><div style="margin-top:4px;color:#5f7268">✅ ${done.ok} envoyé(s)${done.ko?` · ❌ ${done.ko} en échec`:''}${done.skip?` · ${done.skip} déjà envoyé(s)`:''}</div>
+      ${done.ko?`<button class="fb fb-ghost fb-sm" style="margin-top:8px;width:100%" onclick="document.getElementById('wgRunBanner').remove();wgManualFallback(true)">💬 Envoyer les échecs à la main</button>`:''}`;
+    clearTimeout(b._t); b._t = setTimeout(()=>{ try { b.remove(); } catch(e){} }, done.ko ? 45000 : 8000);
+    return;
+  }
+  const R = WG_RUN;
+  b.innerHTML = `<b>📲 Envoi direct depuis le numéro du markaz</b>
+    <div style="height:6px;background:#e5e7eb;border-radius:6px;overflow:hidden;margin:8px 0"><div style="height:100%;width:${Math.round((R.i-1)/Math.max(1,R.n)*100)}%;background:#16a34a"></div></div>
+    <div style="color:#5f7268">${R.i} / ${R.n}${it?' · '+esc(it.parent||'Parent'):''} — ✅ ${R.ok}${R.ko?' · ❌ '+R.ko:''}</div>
+    <button class="fb fb-ghost fb-sm" style="margin-top:8px;width:100%" onclick="if(WG_RUN)WG_RUN.stop=true">⏹ Arrêter</button>`;
+}
+async function wgRunBatch(items){
+  if (WG_RUN){ toast('Un envoi direct est déjà en cours.'); return; }
+  if (!items || !items.length){ toast('✅ Tous les rappels du jour sont déjà envoyés.'); return; }
+  WG_RUN = { n: items.length, i: 0, ok: 0, ko: 0, skip: 0, stop: false };
+  try {
+    for (let k = 0; k < items.length; k++){
+      if (WG_RUN.stop) break;
+      const it = items[k];
+      WG_RUN.i = k + 1; wgBanner(it);
+      const l = waLogGet(it.key);
+      if (l && (l.s === 'ok' || l.s === 'manual' || l.s === 'nowa')){ WG_RUN.skip++; continue; }   // envoyé entre-temps (autre appareil)
+      const ok = await wgSendLogged(it.key, { t: it.type, n: it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', '), m: it.total }, it.phone, it.text);
+      if (ok) WG_RUN.ok++; else WG_RUN.ko++;
+      wgLockTouch();
+      if (WG_RUN.ko >= 3 && WG_RUN.ok === 0){ WG_RUN.stop = true; toast('⚠️ La passerelle ne répond pas : envoi direct interrompu.', 5000); break; }
+      if (k < items.length - 1 && !WG_RUN.stop) await new Promise(r=>setTimeout(r, 3000 + Math.floor(Math.random()*3000)));
+    }
+  } finally {
+    const R = WG_RUN; WG_RUN = null;
+    wgBanner(null, R);
+    toast('📲 Envoi direct : ' + R.ok + ' message(s) envoyé(s)' + (R.ko ? ', ' + R.ko + ' en échec' : '') + '.', 4500);
+    if (currentPage === 'whatsapp') renderWhatsApp();
+  }
+}
+/* Verrou du jour : un seul appareil envoie la liste automatique. */
+function wgLockOk(day){ const L = (DB.waGateway || {}).lock; return !L || L.day !== day || L.by === DEVICE_ID || (Date.now() - (L.at||0)) > 10*60000; }
+function wgLockTake(day){ if (!DB.waGateway) return; DB.waGateway.lock = { day, by: DEVICE_ID, at: Date.now() }; saveDB(); }
+function wgLockTouch(){ try { const L = DB.waGateway && DB.waGateway.lock; if (L && L.by === DEVICE_ID) L.at = Date.now(); } catch(e){} }
+async function wgAutoRun(now, failedOnly){
+  const day = waDayKey(now);
+  const sk = 'agm_wg_auto_' + day + (failedOnly ? '_f' : '');
+  let seen = null; try { seen = sessionStorage.getItem(sk); } catch(e){}
+  if (seen || WG_RUN) return;
+  if (!waPendingItems(now, failedOnly).length || !wgLockOk(day)) return;
+  wgLockTake(day);
+  await new Promise(r=>setTimeout(r, 6000));                 // laisse le temps à un autre appareil de se manifester
+  const L = (DB.waGateway || {}).lock || {};
+  if (L.by !== DEVICE_ID && !wgLockOk(day)) return;
+  try { sessionStorage.setItem(sk, '1'); } catch(e){}
+  await wgRunBatch(waPendingItems(now, failedOnly));
+}
+let _wgOrigGuided = null, _wgOrigPrompt = null;
+function wgManualFallback(failedOnly){ if (_wgOrigGuided) _wgOrigGuided(!!failedOnly); }
+function wgFallbackBanner(key, phone, text, who, type){
+  let b = document.getElementById('waManualBanner');
+  if (!b){
+    b = document.createElement('div'); b.id = 'waManualBanner';
+    b.style.cssText = 'position:fixed;left:50%;bottom:70px;transform:translateX(-50%);z-index:9998;background:#fff;color:#14261b;border:2px solid #f59e0b;border-radius:12px;padding:12px 14px;box-shadow:0 10px 28px rgba(0,0,0,.3);max-width:92vw;width:380px;font-size:13px';
+    document.body.appendChild(b);
+  }
+  b.innerHTML = `<b>⚠️ Envoi direct impossible</b><div style="margin:4px 0 10px;color:#5f7268">Envoyer le message à ${esc(who||'parent')} (+${esc(phone)}) depuis WhatsApp ?</div>
+    <div style="display:flex;gap:8px"><button class="fb fb-green fb-sm" style="flex:1" id="wgFbGo">💬 Envoyer sur WhatsApp</button>
+    <button class="fb fb-ghost fb-sm" onclick="document.getElementById('waManualBanner').remove()">Plus tard</button></div>`;
+  document.getElementById('wgFbGo').onclick = function(){
+    window.open(waLink(phone, text), '_blank');
+    waLogSet(key, { t:type, p: phone, s:'manual', e:'', n: who||'' });
+    b.remove();
+    if (currentPage === 'whatsapp') renderWhatsApp();
+  };
+  clearTimeout(b._t); b._t = setTimeout(()=>{ try { b.remove(); } catch(e){} }, 60000);
+}
+
+/* ---- Branchement sur les envois existants (sans modifier leurs fonctions) ---- */
+(function(){
+  if (window._agmOWgHooked) return; window._agmOWgHooked = true;
+
+  _wgOrigGuided = waStartGuided;
+  waStartGuided = function(failedOnly){
+    if (!wgReady()) return _wgOrigGuided.apply(this, arguments);
+    const items = waPendingItems(new Date(), failedOnly);
+    if (!items.length){ toast('✅ Tous les rappels du jour sont déjà envoyés.'); return; }
+    const bn = document.getElementById('waRemindBanner'); if (bn) bn.remove();
+    if (!confirm('Envoyer maintenant ' + items.length + ' message(s) directement depuis le numéro WhatsApp du markaz ?')) return;
+    wgRunBatch(items);
+  };
+
+  _wgOrigPrompt = waPromptPending;
+  waPromptPending = function(now, failedOnly, force){
+    const self = this, args = arguments, c = waCfg();
+    if (!wgAutoWanted() || WG_RUN){ if (c.promptAssisted || force) return _wgOrigPrompt.apply(self, args); return; }
+    wgRefresh().then(st=>{
+      if (st === 'authorized'){
+        let done = null; try { done = sessionStorage.getItem('agm_wg_auto_' + waDayKey(now || new Date())); } catch(e){}
+        if (done){ if (c.promptAssisted) _wgOrigPrompt.call(self, now, true); return; }   // échecs éventuels : envoi manuel proposé
+        wgAutoRun(now || new Date(), failedOnly);
+      } else if (c.promptAssisted || force) _wgOrigPrompt.apply(self, args);
+    });
+  };
+
+  const _wspc = waSendPaymentConfirmation;
+  waSendPaymentConfirmation = function(paymentId, force){
+    if (!wgConfigured()) return _wspc.apply(this, arguments);
+    const self = this, args = arguments;
+    const p = (DB.payments||[]).find(x=>x.id===paymentId);
+    if (!p || (!force && !waPaymentEligible(p))) return;
+    const key = 'pay_' + p.id, prev = waLogGet(key);
+    if (!force && prev && (prev.s === 'ok' || prev.s === 'manual')) return;
+    const s = (DB.students||[]).find(x=>x.id===p.student_id) || {};
+    const phone = waNormPhone(s.guardian_phone);
+    if (!phone) return _wspc.apply(self, args);
+    wgRefresh().then(async st=>{
+      if (st !== 'authorized') return _wspc.apply(self, args);
+      const ok = await wgSendLogged(key, { t:'paiement', n:(s.first_name||'')+' '+(s.last_name||'') }, phone, waPaymentText(p));
+      if (ok) toast('📲 Confirmation de paiement envoyée à ' + (s.guardian_name || 'au parent') + ' depuis le numéro du markaz.', 4000);
+      else _wspc.apply(self, args);             // échec : bandeau d'envoi manuel habituel
+    });
+  };
+
+  const _wd = waDirect;
+  waDirect = function(i){
+    const it = (window._waQueue||[])[i]; if (!it) return;
+    if (!wgReady()) return _wd.apply(this, arguments);
+    closeModal();
+    toast('📲 Envoi en cours à ' + (it.parent || 'au parent') + '…');
+    const who = it.lines.map(x=>x.s.first_name+' '+x.s.last_name).join(', ');
+    wgSendLogged(it.key, { t: it.type, n: who, m: it.total }, it.phone, it.text).then(ok=>{
+      if (ok) toast('✅ Message envoyé directement à ' + (it.parent || 'au parent') + '.');
+      else wgFallbackBanner(it.key, it.phone, it.text, it.parent || who, it.type);
+      if (currentPage === 'whatsapp') renderWhatsApp();
+    });
+  };
+
+  const _wdr = waDebtReminderOne;
+  waDebtReminderOne = function(studentId){
+    if (!wgReady()) return _wdr.apply(this, arguments);
+    const s = DB.students.find(x=>x.id===studentId); if (!s) return;
+    const phone = waNormPhone(s.guardian_phone);
+    if (!phone) return _wdr.apply(this, arguments);
+    const target = nTodayYM();
+    const sit = nDebtSituation(s, target + '-99');
+    const g = { phone, parent: s.guardian_name||'', lines: [{ s, arrears: sit.arrears, arrearsAmount: sit.totalDue, target, dueT: 0 }] };
+    const text = waReminderText(g, sit.totalDue, true);
+    const key = waDayKey() + '_one_' + s.id;
+    const who = s.first_name + ' ' + s.last_name;
+    toast('📲 Envoi du rappel en cours…');
+    wgSendLogged(key, { t:'dette', n: who, m: sit.totalDue }, phone, text).then(ok=>{
+      if (ok) toast('✅ Rappel de dette envoyé directement au parent de ' + who + '.');
+      else wgFallbackBanner(key, phone, text, s.guardian_name || who, 'dette');
+    });
+  };
+
+  const _rw = renderWhatsApp;
+  renderWhatsApp = function(){
+    const r = _rw.apply(this, arguments);
+    try {
+      const head = document.querySelector('#pageContent .page-head');
+      if (head && !document.getElementById('wgCard')){
+        const d = document.createElement('div'); d.id = 'wgCard';
+        head.parentNode.insertBefore(d, head.nextSibling);
+      }
+      wgPaintPage();
+      if (wgConfigured() && (Date.now() - WG.at) > 60000) wgRefresh(true);
+    } catch(e){}
+    return r;
+  };
+})();
+
+/* ---- Affichage de l'état de connexion ---- */
+function wgStateText(){
+  if (!wgConfigured()) return { ic:'⚪', t:'Numéro du markaz non connecté', d:'Envoi manuel : WhatsApp s’ouvre avec le message prêt, vous appuyez sur ➤.', col:'#94a3b8' };
+  if (!WG.at) return { ic:'⏳', t:'Vérification de la connexion…', d:'', col:'#94a3b8' };
+  const ph = WG.phone || wgCfg().phone;
+  switch(WG.state){
+    case 'authorized': return { ic:'🟢', t:'Numéro connecté' + (ph ? ' : +' + ph : ''), d:'Envoi direct : les messages partent automatiquement de ce numéro, sans ouvrir WhatsApp.', col:'#16a34a' };
+    case 'notAuthorized': return { ic:'🔴', t:'Numéro déconnecté', d:'Reliez le numéro du markaz (code de liaison ou QR code). En attendant : envoi manuel.', col:'#dc2626' };
+    case 'starting': return { ic:'⏳', t:'Connexion en cours de démarrage', d:'Réessayez dans une minute. En attendant : envoi manuel.', col:'#f59e0b' };
+    case 'blocked': return { ic:'⛔', t:'Numéro bloqué par WhatsApp', d:'Envoi manuel en attendant.', col:'#dc2626' };
+    case 'suspended': return { ic:'⛔', t:'Numéro temporairement suspendu', d:'Envoi manuel en attendant.', col:'#dc2626' };
+    case 'sleepMode': return { ic:'💤', t:'Téléphone du markaz hors ligne', d:'Allumez le téléphone et vérifiez sa connexion internet.', col:'#f59e0b' };
+    case 'error': return { ic:'⚠️', t:'Passerelle injoignable', d:(WG.err ? WG.err + ' — ' : '') + 'vérifiez la connexion internet et les identifiants. Envoi manuel en attendant.', col:'#f59e0b' };
+  }
+  return { ic:'⚪', t:'État : ' + (WG.state || 'inconnu'), d:'Envoi manuel en attendant.', col:'#94a3b8' };
+}
+function wgPaintPage(){
+  const card = document.getElementById('wgCard');
+  const st = wgStateText();
+  if (card){
+    card.className = 'card';
+    card.style.cssText = 'margin-bottom:14px;border-left:4px solid ' + st.col;
+    card.innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center">
+        <div style="min-width:0"><b>${st.ic} ${esc(st.t)}</b><div style="font-size:12px;color:var(--muted);margin-top:3px">${esc(st.d)}</div></div>
+        ${isAdminOrAbove()?`<button class="fb ${wgReady()?'fb-ghost':'fb-green'} fb-sm" onclick="wgOpenConnect()">🔗 ${wgConfigured()?'Connexion du numéro':'Connecter le numéro du markaz'}</button>`:''}
+      </div>`;
+  }
+  const mt = document.getElementById('waModeTxt');
+  if (mt) mt.innerHTML = wgReady()
+    ? 'Les messages partent <b>directement du numéro WhatsApp connecté du markaz</b> : aucun geste n’est nécessaire, chaque parent reçoit son message automatiquement.'
+    : "Les messages partent de <b>votre WhatsApp</b> : chaque message est déjà rédigé, vous n'avez qu'à appuyer sur ➤ dans WhatsApp, puis le parent suivant s'affiche.";
+  const bt = document.getElementById('waMainBtnTxt');
+  if (bt) bt.textContent = wgReady() ? '📲 Envoyer directement les rappels du jour à tous les parents' : '📲 Envoyer les rappels du jour à tous les parents';
+}
+function wgSettingsLine(){
+  const st = wgStateText();
+  return `<div style="font-size:12px;margin:-4px 0 10px">${st.ic} ${esc(st.t)}${wgReady()?' — envoi direct automatique':''}</div>`;
+}
+
+/* ---- Fenêtre de connexion du numéro ---- */
+function wgStopPoll(){ if (WG_POLL){ clearTimeout(WG_POLL); WG_POLL = null; } }
+function wgModalOpen(){ const m = document.getElementById('modalBg'); return !!(m && m.classList.contains('show') && document.getElementById('wgStatusBox')); }
+function wgOpenConnect(){
+  if (!isAdminOrAbove()){ toast('Réservé au fondateur / administrateur.'); return; }
+  wgStopPoll();
+  const g = wgCfg();
+  const box = 'background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:12px 13px;margin-bottom:12px';
+  openModal(`
+    <h3 style="margin-bottom:4px">🔗 Envoi direct depuis le numéro du markaz</h3>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Une fois le numéro WhatsApp du markaz connecté, les rappels de mensualité, les relances de dettes et les confirmations de paiement partent <b>automatiquement</b> de ce numéro. Si le numéro n'est pas connecté, l'appli garde la méthode actuelle (message prêt, envoi à la main).</p>
+    <div style="${box}">
+      <div class="fl" style="margin-bottom:6px">① Passerelle Green-API</div>
+      <div style="font-size:11.5px;color:var(--muted);margin-bottom:10px">Créez un compte sur <b>green-api.com</b>, puis une « instance » dans la console : copiez ici ses identifiants <b>apiUrl</b>, <b>idInstance</b> et <b>apiTokenInstance</b>. L'offre gratuite « Developer » ne permet d'écrire qu'à 3 numéros (utile pour essayer) ; pour tous les parents, l'offre « Business » est nécessaire.</div>
+      <div class="fg"><label class="fl">apiUrl</label><input class="fi" id="wgUrl" value="${esc(g.apiUrl)}" placeholder="https://api.green-api.com"></div>
+      <div class="fg2">
+        <div class="fg"><label class="fl">idInstance</label><input class="fi" id="wgId" inputmode="numeric" value="${esc(g.idInstance)}" placeholder="1101000001"></div>
+        <div class="fg"><label class="fl">apiTokenInstance</label><input class="fi" id="wgTok" type="password" autocomplete="off" value="${esc(g.apiToken)}" placeholder="••••••••"></div>
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-bottom:10px"><input type="checkbox" id="wgAuto" ${g.auto?'checked':''}> Envoyer automatiquement les rappels du jour (jours et heure choisis dans les Réglages des rappels)</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="fb fb-gold" style="flex:1" onclick="wgSaveConnect()">💾 Enregistrer et vérifier</button>
+        ${wgConfigured()?`<button class="fb fb-ghost" onclick="wgDisable()">Désactiver l'envoi direct</button>`:''}
+      </div>
+    </div>
+    <div id="wgStatusBox" style="${box}">${wgConfigured()?'⏳ Vérification de la connexion…':'Renseignez les identifiants ci-dessus puis enregistrez.'}</div>
+    <button class="fb fb-ghost" style="width:100%" onclick="wgStopPoll();closeModal();if(currentPage==='whatsapp')renderWhatsApp()">Fermer</button>`);
+  if (wgConfigured()) wgCheckAndShow();
+}
+function wgSaveConnect(){
+  if (!isAdminOrAbove()) return;
+  const url = ((document.getElementById('wgUrl')||{}).value||'').trim() || 'https://api.green-api.com';
+  const id = ((document.getElementById('wgId')||{}).value||'').replace(/\s/g,'');
+  const tok = ((document.getElementById('wgTok')||{}).value||'').trim();
+  const auto = !!(document.getElementById('wgAuto')||{}).checked;
+  if (!/^https:\/\/[^\s/]+/i.test(url)){ toast("L'apiUrl doit commencer par https://"); return; }
+  if (!/^\d{6,}$/.test(id)){ toast("L'idInstance est un nombre (voir la console Green-API)."); return; }
+  if (tok.length < 10){ toast("Collez l'apiTokenInstance complet."); return; }
+  const prev = DB.waGateway || {};
+  const same = prev.idInstance === id && prev.apiToken === tok;
+  DB.waGateway = Object.assign({}, prev, { apiUrl: url.replace(/\/+$/,''), idInstance: id, apiToken: tok, auto, active: true, updatedAt: Date.now() });
+  if (!same){ DB.waGateway.phone = ''; WG.phone = ''; }
+  saveDB();
+  logAction('WhatsApp direct', 'Passerelle enregistrée (instance ' + id + ')' + (auto ? ' — envoi automatique des rappels' : ''));
+  wgCheckAndShow();
+}
+function wgDisable(){
+  if (!isAdminOrAbove() || !DB.waGateway) return;
+  if (!confirm("Désactiver l'envoi direct ? Les rappels repasseront en envoi manuel (le numéro reste relié à la passerelle).")) return;
+  DB.waGateway.active = false; saveDB();
+  logAction('WhatsApp direct', 'Envoi direct désactivé');
+  WG.state = ''; WG.at = 0;
+  wgStopPoll(); closeModal();
+  toast("Envoi direct désactivé : retour à l'envoi manuel.");
+  if (currentPage==='whatsapp') renderWhatsApp();
+}
+async function wgCheckAndShow(){
+  const box = document.getElementById('wgStatusBox'); if (!box) return;
+  box.innerHTML = '⏳ Vérification de la connexion…';
+  const st = await wgRefresh(true);
+  wgPaintStatus(st);
+}
+function wgPaintStatus(st){
+  const box = document.getElementById('wgStatusBox'); if (!box) return;
+  const s = wgStateText();
+  const def = waNormPhone(DB.centerPhone || '') || waCfg().countryCode;
+  let h = `<div class="fl" style="margin-bottom:6px">② Numéro WhatsApp du markaz</div><b>${s.ic} ${esc(s.t)}</b><div style="font-size:12px;color:var(--muted);margin:4px 0 10px">${esc(s.d)}</div>`;
+  if (st === 'authorized'){
+    h += `<div class="fg"><label class="fl">Envoyer un message test au numéro</label><input class="fi" id="wgTestTo" inputmode="tel" value="${esc(def)}"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="fb fb-green" style="flex:1" onclick="wgTest()">✉️ Envoyer un message test</button>
+        <button class="fb fb-ghost" onclick="wgCheckAndShow()">↻ Revérifier</button>
+        <button class="fb fb-danger" onclick="wgLogout()">🔌 Déconnecter le numéro</button></div>`;
+  } else if (st === 'notAuthorized'){
+    h += `<div style="border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px">
+        <b>🔢 Lier avec un code</b> <span style="font-size:11.5px;color:var(--muted)">— conseillé si le WhatsApp du markaz est sur ce téléphone</span>
+        <div class="fg" style="margin-top:8px"><label class="fl">Numéro WhatsApp du markaz (avec l'indicatif)</label><input class="fi" id="wgPhone" inputmode="tel" value="${esc(def)}"></div>
+        <button class="fb fb-green" style="width:100%" onclick="wgGetCode()">🔢 Obtenir le code de liaison</button>
+        <div id="wgCodeBox"></div></div>
+      <div style="border:1px solid var(--line);border-radius:10px;padding:10px">
+        <b>📷 Scanner un QR code</b> <span style="font-size:11.5px;color:var(--muted)">— depuis un autre écran</span>
+        <button class="fb fb-ghost" style="width:100%;margin-top:8px" onclick="wgShowQr()">📷 Afficher le QR code</button>
+        <div id="wgQrBox" style="text-align:center"></div></div>`;
+  } else {
+    h += `<button class="fb fb-ghost" style="width:100%" onclick="wgCheckAndShow()">↻ Revérifier</button>`;
+  }
+  box.innerHTML = h;
+}
+/** Après liaison, on surveille l'état jusqu'à « connecté » (3 minutes au plus). */
+function wgWatchAuthorized(limitMs){
+  wgStopPoll();
+  const end = Date.now() + (limitMs || 180000);
+  const tick = async ()=>{
+    if (!wgModalOpen() || Date.now() > end){ wgStopPoll(); return; }
+    const st = await wgRefresh(true);
+    if (st === 'authorized'){
+      wgStopPoll();
+      toast('🟢 Numéro du markaz connecté : les messages partiront désormais directement.', 5000);
+      logAction('WhatsApp direct', 'Numéro du markaz connecté' + (WG.phone ? ' (+' + WG.phone + ')' : ''));
+      wgPaintStatus(st);
+      return;
+    }
+    WG_POLL = setTimeout(tick, 4000);
+  };
+  WG_POLL = setTimeout(tick, 4000);
+}
+async function wgGetCode(){
+  const ph = waNormPhone(((document.getElementById('wgPhone')||{}).value||''));
+  const box = document.getElementById('wgCodeBox'); if (!box) return;
+  if (!ph){ toast('Saisissez le numéro WhatsApp du markaz.'); return; }
+  box.innerHTML = '<div style="margin-top:8px;font-size:12px">⏳ Demande du code… (jusqu’à 30 secondes)</div>';
+  try {
+    const j = await wgCall('getAuthorizationCode', { phoneNumber: Number(ph) }, 45000);
+    if (!j.status || !j.code){ box.innerHTML = '<div style="margin-top:8px;font-size:12px;color:#b91c1c">Code non reçu : le numéro est peut-être déjà connecté. Revérifiez, ou réessayez dans un instant.</div>'; return; }
+    box.innerHTML = `<div style="margin-top:10px;text-align:center">
+        <div style="font-family:'DM Mono',monospace;font-size:30px;font-weight:800;letter-spacing:.18em;background:var(--panel2);border-radius:10px;padding:10px">${esc(j.code)}</div>
+        <div style="font-size:12px;text-align:left;margin-top:8px">Dans WhatsApp sur le téléphone du markaz : <b>⋮ / Réglages → Appareils connectés → Connecter un appareil → Connecter avec le numéro de téléphone</b>, puis saisissez ce code. Il est valable environ 2 minutes et demie.</div>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:6px">⏳ En attente de la connexion…</div></div>`;
+    wgWatchAuthorized(180000);
+  } catch(e){
+    box.innerHTML = `<div style="margin-top:8px;font-size:12px;color:#b91c1c">Erreur : ${esc((e && e.message) || e)}</div>`;
+  }
+}
+function wgShowQr(){
+  wgStopPoll();
+  const end = Date.now() + 180000;
+  const tick = async ()=>{
+    const box = document.getElementById('wgQrBox');
+    if (!box || !wgModalOpen() || Date.now() > end){ wgStopPoll(); if (box && Date.now() > end) box.innerHTML = '<div style="font-size:12px;margin-top:8px">QR code expiré : touchez à nouveau « Afficher le QR code ».</div>'; return; }
+    try {
+      const j = await wgCall('qr', undefined, 15000);
+      if (j.type === 'qrCode' && j.message){
+        box.innerHTML = `<img alt="QR code" style="width:240px;max-width:100%;margin-top:10px;background:#fff;padding:8px;border-radius:10px" src="data:image/png;base64,${String(j.message).replace(/[^A-Za-z0-9+/=]/g,'')}">
+          <div style="font-size:12px;text-align:left;margin-top:6px">Avec le téléphone du markaz : <b>WhatsApp → Appareils connectés → Connecter un appareil</b>, puis scannez ce code (il se renouvelle tout seul).</div>`;
+      } else if (j.type === 'alreadyLogged'){
+        wgStopPoll(); const st = await wgRefresh(true); wgPaintStatus(st);
+        toast('🟢 Numéro du markaz connecté.'); return;
+      } else if (j.type === 'error'){
+        box.innerHTML = `<div style="font-size:12px;margin-top:8px;color:#b91c1c">${esc(j.message || 'Erreur')}</div>`;
+      }
+    } catch(e){
+      box.innerHTML = `<div style="font-size:12px;margin-top:8px;color:#b91c1c">Erreur : ${esc((e && e.message) || e)}</div>`;
+    }
+    WG_POLL = setTimeout(tick, 2500);
+  };
+  tick();
+}
+async function wgTest(){
+  const ph = waNormPhone(((document.getElementById('wgTestTo')||{}).value||''));
+  if (!ph){ toast('Saisissez un numéro pour le test.'); return; }
+  try {
+    await wgSend(ph, `✅ *${DB.centerName||'AGM'}* — message de test : l'envoi direct des rappels WhatsApp fonctionne.`);
+    toast('✅ Message test envoyé au +' + ph + '.');
+  } catch(e){ toast('⚠️ Échec du test : ' + ((e && e.message) || e), 5000); }
+}
+async function wgLogout(){
+  if (!confirm('Déconnecter le numéro WhatsApp du markaz de la passerelle ? Les rappels repasseront en envoi manuel.')) return;
+  try { await wgCall('logout', undefined, 20000); } catch(e){}
+  WG.phone = ''; if (DB.waGateway){ DB.waGateway.phone = ''; saveDB(); }
+  logAction('WhatsApp direct', 'Numéro du markaz déconnecté');
+  wgCheckAndShow();
+}
+
+/* ---- Vérification périodique de la connexion (fondateur, admin, comptable) ---- */
+if (!window._agmWgTimer){
+  const ok = ()=>{ try { return SESSION && DB && wgConfigured() && ['fondateur','admin','comptable'].includes((currentUser()||{}).role); } catch(e){ return false; } };
+  window._agmWgTimer = setInterval(()=>{ if (ok()) wgRefresh(); }, 180000);
+  setTimeout(()=>{ if (ok()) wgRefresh(true); }, 8000);
+}
+
+/* =====================================================================
+   RÉGLAGES — carte « Réglages du fondateur » (regroupe les 4 réglages)
+   ===================================================================== */
+function oFounderCardHtml(){
+  if (!isAdminOrAbove()) return '';
+  const dc = debtCfg(), b = rbBook(rbCfg().book), ev = evActive();
+  const item = 'border:1px solid var(--line);border-radius:11px;padding:11px 12px;margin-bottom:9px;background:var(--panel)';
+  const help = 'font-size:11.5px;color:var(--muted);margin-top:4px';
+  return `<div class="card" style="margin-bottom:16px;border-left:4px solid var(--gold);max-width:calc(100vw - 36px);box-sizing:border-box">
+    <b>🧩 Réglages du fondateur</b>
+    <div style="font-size:12px;color:var(--muted);margin:4px 0 12px">Ces réglages s'appliquent à tout le markaz. Ils n'effacent ni ne modifient aucune donnée enregistrée.</div>
+    <div style="${item}">
+      <label style="display:flex;gap:9px;align-items:flex-start;font-weight:700;cursor:pointer"><input type="checkbox" style="margin-top:3px;flex-shrink:0" ${dc.internatArrival?'checked':''} onchange="oSaveDebtCfg(this.checked)">
+        <span>🏠 Internat : calculer la mensualité de chaque élève à partir de sa date d'arrivée au markaz</span></label>
+      <div style="${help}">Activé : le mois de l'interne court de son jour d'arrivée (ou d'inscription) au même jour du mois suivant. Désactivé : calcul habituel, mois par mois depuis le mois d'inscription. La date d'arrivée se saisit dans la fiche de l'élève (✏️ Modifier).</div>
+    </div>
+    <div style="${item}">
+      <b>📘 Livre de lecture (élèves Hourouf)</b><div style="${help}">Actuel : <b>${esc(b.name)}</b></div>
+      <button class="fb fb-gold fb-sm" style="margin-top:8px" onclick="rbOpenConfig()">📘 Choisir le livre</button>
+    </div>
+    <div style="${item}">
+      <label style="display:flex;gap:9px;align-items:flex-start;font-weight:700;cursor:pointer"><input type="checkbox" style="margin-top:3px;flex-shrink:0" ${rwOn()?'checked':''} onchange="rwSaveCfg(this.checked)">
+        <span>🎙️ Restitution hebdomadaire : accumuler les leçons maîtrisées et les faire restituer le jour de restitution</span></label>
+      <div style="${help}">Jour(s) de restitution : <b>${esc(rwDaysLabel())}</b> (réglables dans « Jours de restitution » plus bas). Chaque leçon maîtrisée part en Restitution et la suivante est débloquée dès le lendemain ; le jour venu, l'élève restitue toutes ses leçons, nouvelles et anciennes.</div>
+    </div>
+    <div style="${item}">
+      <b>📝 Critères d'évaluation</b><div style="${help}">${ev.length} critère(s) : ${esc(ev.map(c=>c.label+(c.coef>1?' ×'+c.coef:'')).join(', '))}. Classements séparés Internat / Externat.</div>
+      <button class="fb fb-gold fb-sm" style="margin-top:8px" onclick="evOpenConfig()">📝 Configurer les critères</button>
+    </div>
+    <div style="${item}">
+      <b>📲 Envoi direct des rappels WhatsApp</b><div style="${help}">${esc(wgStateText().t)}</div>
+      <button class="fb fb-gold fb-sm" style="margin-top:8px" onclick="wgOpenConnect()">🔗 Numéro du markaz</button>
+    </div>
+  </div>`;
 }
 
 </script>
