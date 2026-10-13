@@ -1548,7 +1548,7 @@ function pageHead(title, sub, actionsHtml){
    après un déploiement, c'est que l'ancienne version est encore en
    cache sur l'appareil.
    ===================================================================== */
-const AGM_VERSION = '2026.10.09-2';
+const AGM_VERSION = '2026.10.13-1';
 
 /** Supprime tout le cache local de l'appli et recharge la dernière version. */
 async function forcerMiseAJour(){
@@ -3090,48 +3090,111 @@ function clearPaymentSearch(){
 }
 
 function currentMonthYM(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
-/** Cases à cocher : LES 12 MOIS UNIQUEMENT (Janvier → Décembre).
- *  L'année n'est plus affichée dans la liste : c'est l'année de la date de
- *  saisie du paiement (champ « Date du paiement ») qui est prise en compte.
- *  Si le formulaire est ouvert depuis le suivi des dettes avec un mois
- *  précis (preselect = "AAAA-MM"), l'année de ce mois est conservée. */
-function payMonthCheckboxesHtml(preselect){
-  const preMonth = preselect ? Number(String(preselect).split('-')[1]) : (new Date().getMonth()+1);
-  let html = '';
-  for (let m=1; m<=12; m++){
-    html += `<label style="display:flex;align-items:center;gap:5px;font-size:11.5px;padding:3px 4px">
-      <input type="checkbox" class="payMonthChk" value="${String(m).padStart(2,'0')}" ${m===preMonth?'checked':''} onchange="updatePayMonthHint()"> ${monthLabel(m)}
-    </label>`;
+/* ---------------------------------------------------------------------
+   Sélecteur des mois payés : chaque mois est choisi AVEC son année
+   (◀ année ▶). On peut cocher des mois de plusieurs années dans le même
+   versement (ex. Décembre 2025 + Janvier 2026). L'état de chaque mois
+   (payé, partiel, impayé, inactif) est affiché pour l'élève choisi.
+   Sert au formulaire de paiement (« pay ») et à la modification (« ep »).
+   ------------------------------------------------------------------- */
+const PMS = {};
+function pmsInit(key, months, year, studentId){
+  const sel = (months||[]).map(String).filter(v=>/^\d{4}-\d{2}$/.test(v));
+  const y = Number(year) || (sel.length ? Number(sel[0].slice(0,4)) : new Date().getFullYear());
+  PMS[key] = { year: y, sel: sel.filter((v,i,a)=>a.indexOf(v)===i), sid: studentId || '' };
+  return PMS[key];
+}
+function pmsSorted(key){ const st = PMS[key]; return st ? st.sel.slice().sort() : []; }
+function pmsGridHtml(key){
+  const st = PMS[key]; if (!st) return '';
+  const s = st.sid ? (DB.students||[]).find(x=>x.id===st.sid) : null;
+  let pm = null; if (s){ try { pm = nPaidByMonth(s.id); } catch(e){} }
+  let h = '';
+  for (let m = 1; m <= 12; m++){
+    const ym = ymOf(st.year, m);
+    let tag = '', col = 'var(--muted)';
+    if (s && pm){
+      try {
+        const c = carteMonthState(s, ym, pm);
+        if (c.st === 'paye'){ tag = '✔ payé'; col = '#16a34a'; }
+        else if (c.st === 'partiel'){ tag = '◐ ' + fmtGNF(c.paid); col = '#d97706'; }
+        else if (c.st === 'impaye'){ tag = '✖ impayé'; col = '#dc2626'; }
+        else if (c.st === 'inactif'){ tag = '⏸ inactif'; }
+        else if (c.st === 'avant'){ tag = 'avant inscr.'; }
+      } catch(e){}
+    }
+    const on = st.sel.indexOf(ym) !== -1;
+    h += `<label style="display:flex;align-items:center;gap:6px;font-size:12px;padding:5px 6px;border-radius:7px;${on?'background:rgba(21,128,61,.10);':''}">
+      <input type="checkbox" class="${key==='pay'?'payMonthChk':'pmsChk'}" value="${ym}" ${on?'checked':''} onchange="pmsToggle('${key}','${ym}',this.checked)">
+      <span style="display:flex;flex-direction:column;line-height:1.15"><b style="font-weight:700">${esc(monthLabel(m))}</b>${tag?`<span style="font-size:10px;color:${col}">${tag}</span>`:''}</span></label>`;
   }
-  return html;
+  return h;
 }
-/** Année prise en compte pour les mois cochés :
- *  - si le formulaire a été ouvert avec un mois précis (dette), l'année de ce mois ;
- *  - sinon, l'année de la date saisie dans « Date du paiement ». */
-function payYearInUse(){
-  const lock = document.getElementById('payYearLock');
-  if (lock && lock.value) return Number(lock.value);
-  const d = (document.getElementById('payDate')||{}).value;
-  const y = d ? Number(String(d).split('-')[0]) : NaN;
-  return (y && y>1900) ? y : new Date().getFullYear();
+/** Bloc complet : barre d'année + 12 mois + récapitulatif des mois choisis. */
+function pmsHtml(key){
+  const st = PMS[key]; if (!st) return '';
+  return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
+      <button type="button" class="fb fb-ghost fb-sm" onclick="pmsYear('${key}',-1)">◀</button>
+      <span style="font-size:12px">Année : <b id="${key}PmsYear" style="color:var(--gold-light);font-size:15px">${st.year}</b></span>
+      <button type="button" class="fb fb-ghost fb-sm" onclick="pmsYear('${key}',1)">▶</button>
+    </div>
+    <div id="${key}PmsGrid" style="border:1px solid var(--line);border-radius:8px;padding:4px;display:grid;grid-template-columns:repeat(2,1fr)">${pmsGridHtml(key)}</div>
+    <div id="${key}PmsSel" style="font-size:11.5px;margin-top:6px"></div>`;
 }
-/** Met à jour l'affichage de l'année quand la date du paiement change. */
-function syncPayYear(){
-  const lbl = document.getElementById('payYearLabel');
-  if (lbl) lbl.textContent = payYearInUse();
-  updatePayMonthHint();
+function pmsRefresh(key){
+  const st = PMS[key]; if (!st) return;
+  const y = document.getElementById(key+'PmsYear'); if (y) y.textContent = st.year;
+  const g = document.getElementById(key+'PmsGrid'); if (g) g.innerHTML = pmsGridHtml(key);
+  const box = document.getElementById(key+'PmsSel');
+  if (box){
+    const l = pmsSorted(key);
+    box.innerHTML = l.length ? '✅ <b>Mois choisis :</b> ' + esc(l.map(monthYearLabel).join(', ')) : '<span style="color:var(--muted)">Aucun mois choisi.</span>';
+  }
+  if (key === 'pay') updatePayMonthHint();
 }
+function pmsYear(key, d){ const st = PMS[key]; if (!st) return; st.year += d; pmsRefresh(key); }
+function pmsToggle(key, ym, on){
+  const st = PMS[key]; if (!st) return;
+  st.sel = st.sel.filter(x=>x!==ym); if (on) st.sel.push(ym);
+  pmsRefresh(key);
+}
+function pmsSetStudent(key, sid){ const st = PMS[key]; if (!st) return; st.sid = sid || ''; pmsRefresh(key); }
+
+/** Compatibilité : ancien nom — le bloc complet du sélecteur du formulaire de paiement. */
+function payMonthCheckboxesHtml(preselect){
+  if (!PMS.pay) pmsInit('pay', preselect ? [preselect] : [currentMonthYM()], preselect ? String(preselect).slice(0,4) : null, '');
+  return pmsHtml('pay');
+}
+/** Année affichée dans le sélecteur (les mois cochés gardent chacun leur propre année). */
+function payYearInUse(){ return (PMS.pay && PMS.pay.year) || new Date().getFullYear(); }
+/** La date du paiement ne change plus l'année des mois : chaque mois est choisi avec son année. */
+function syncPayYear(){ updatePayMonthHint(); }
 function updatePayMonthHint(){
   const hint = document.getElementById('payMonthHint');
   if (!hint) return;
-  const n = document.querySelectorAll('.payMonthChk:checked').length;
+  const n = pmsSorted('pay').length;
   const sid = (document.getElementById('payStudentId')||{}).value;
   const s = DB.students.find(x=>x.id===sid);
   const fee = s ? Number(s.monthly_fee)||0 : 0;
-  hint.textContent = n + ' mois sélectionné(s)' + (fee ? ' — montant suggéré : '+fmtGNF(fee*n) : '');
+  let late = [];
+  if (s && fee > 0){
+    try { late = studentDebtLedger(s.id).filter(m=>m.balance>0).map(m=>m.ym); } catch(e){}
+  }
+  const miss = late.filter(ym=>pmsSorted('pay').indexOf(ym) === -1);
+  hint.innerHTML = esc(n + ' mois sélectionné(s)' + (fee ? ' — montant suggéré : '+fmtGNF(fee*n) : '')) +
+    (miss.length ? `<div style="margin-top:4px;color:#b91c1c">Mois en retard : ${esc(late.map(monthYearLabel).join(', '))}
+      <button type="button" class="fb fb-ghost fb-sm" style="margin-left:4px;padding:2px 8px" onclick="payCheckLate()">⤵ Cocher les mois en retard</button></div>` : '');
+}
+function payCheckLate(){
+  const st = PMS.pay; if (!st) return;
+  const sid = (document.getElementById('payStudentId')||{}).value;
+  let late = []; try { late = studentDebtLedger(sid).filter(m=>m.balance>0).map(m=>m.ym); } catch(e){}
+  late.forEach(ym=>{ if (st.sel.indexOf(ym) === -1) st.sel.push(ym); });
+  if (late.length) st.year = Number(late[0].slice(0,4));
+  pmsRefresh('pay');
 }
 function applySuggestedAmount(){
-  const n = document.querySelectorAll('.payMonthChk:checked').length;
+  const n = pmsSorted('pay').length;
   const sid = (document.getElementById('payStudentId')||{}).value;
   const s = DB.students.find(x=>x.id===sid);
   const fee = s ? Number(s.monthly_fee)||0 : 0;
@@ -3166,7 +3229,7 @@ function selectPayStudent(id){
   if (idEl) idEl.value = id;
   if (searchEl) searchEl.value = s.first_name+' '+s.last_name+' — '+s.matricule;
   const box = document.getElementById('payStudentResults'); if (box) box.innerHTML='';
-  updatePayMonthHint();
+  pmsSetStudent('pay', id);
 }
 
 function openPaymentForm(presetStudentId, presetMonth, presetAmount){
@@ -3190,10 +3253,9 @@ function openPaymentForm(presetStudentId, presetMonth, presetAmount){
       </select>
     </div>
     <div class="fg" id="payMonthWrap" style="display:block">
-      <label class="fl">Mois de scolarité concernés (cochez-en plusieurs pour un paiement d'avance) — Année prise en compte : <span id="payYearLabel" style="color:var(--gold-light);font-weight:800">${presetMonth?String(presetMonth).split('-')[0]:new Date().getFullYear()}</span></label>
-      <input type="hidden" id="payYearLock" value="${presetMonth?String(presetMonth).split('-')[0]:''}">
-      <div id="payMonthChecks" style="border:1px solid var(--line);border-radius:8px;padding:6px;display:grid;grid-template-columns:repeat(2,1fr)">
-        ${payMonthCheckboxesHtml(presetMonth)}
+      <label class="fl" id="payMonthLbl">Mois de scolarité concernés (cochez-en plusieurs pour un paiement d'avance ou d'arriérés — changez d'année avec ◀ ▶)</label>
+      <div id="payMonthChecks">
+        ${(pmsInit('pay', presetMonth ? [presetMonth] : [currentMonthYM()], presetMonth ? String(presetMonth).slice(0,4) : null, presetStudentId||''), pmsHtml('pay'))}
       </div>
       <div id="payMonthHint" style="font-size:11px;color:var(--muted);margin-top:6px"></div>
       <button type="button" class="fb fb-ghost fb-sm" style="margin-top:6px" onclick="applySuggestedAmount()">↺ Suggérer le montant (mensualité × mois cochés)</button>
@@ -3207,13 +3269,17 @@ function openPaymentForm(presetStudentId, presetMonth, presetAmount){
       <button class="fb fb-gold" style="flex:1" onclick="savePaymentForm()">💾 Enregistrer + Reçu</button>
       <button class="fb fb-ghost" onclick="closeModal()">Annuler</button>
     </div>`);
-  updatePayMonthHint();
+  pmsRefresh('pay');
 }
-/** Affiche le sélecteur de mois uniquement quand le motif est « Frais de scolarité ». */
+/** Sélecteur de mois : motif « Frais de scolarité » ou « Internat » (pension mensuelle de l'interne). */
 function toggleMonthField(){
   const lbl = (document.getElementById('payLabel')||{}).value;
   const wrap = document.getElementById('payMonthWrap');
-  if (wrap) wrap.style.display = (lbl==='Frais de scolarité') ? 'block' : 'none';
+  if (wrap) wrap.style.display = (lbl==='Frais de scolarité' || lbl==='Internat') ? 'block' : 'none';
+  const t = document.getElementById('payMonthLbl');
+  if (t) t.textContent = lbl==='Internat'
+    ? "Mois de pension de l'internat concernés (changez d'année avec ◀ ▶)"
+    : "Mois de scolarité concernés (cochez-en plusieurs pour un paiement d'avance ou d'arriérés — changez d'année avec ◀ ▶)";
 }
 
 function savePaymentForm(){
@@ -3223,10 +3289,9 @@ function savePaymentForm(){
   if (!studentId){ toast("Sélectionnez un élève : tapez son nom ou son matricule puis cliquez sur son nom dans la liste."); return; }
   const label = document.getElementById('payLabel').value;
   let months = [];
-  if (label==='Frais de scolarité'){
-    const y = payYearInUse(); // année de la date de saisie du paiement
-    months = Array.from(document.querySelectorAll('.payMonthChk:checked')).map(c=>y+'-'+c.value);
-    if (!months.length){ toast('Cochez au moins un mois de scolarité.'); return; }
+  if (label==='Frais de scolarité' || label==='Internat'){
+    months = pmsSorted('pay');   // chaque mois avec SA propre année
+    if (!months.length){ toast(label==='Internat' ? "Cochez au moins un mois de pension de l'internat." : 'Cochez au moins un mois de scolarité.'); return; }
   }
   const p = recordPayment({
     student_id: studentId,
@@ -3253,13 +3318,7 @@ function studentDebtLedger(studentId){
   const enroll = s.enrollment_date ? new Date(s.enrollment_date) : new Date();
   let y = enroll.getFullYear(), m = enroll.getMonth()+1;
   const now = new Date(); const endY = now.getFullYear(), endM = now.getMonth()+1;
-  const paidByMonth = {};
-  DB.payments.filter(p=>p.student_id===studentId && p.label==='Frais de scolarité' && p.status!=='rejected' && paymentMonths(p).length)
-    .forEach(p=>{
-      const months = paymentMonths(p);
-      const share = Number(p.amount||0) / months.length;
-      months.forEach(ym => { paidByMonth[ym] = (paidByMonth[ym]||0) + share; });
-    });
+  const paidByMonth = nPaidByMonth(studentId);     // même répartition que les cartes de paiement
   const months = [];
   // Sécurité : borne à 60 mois pour éviter une boucle démesurée sur une très ancienne inscription.
   let guard = 0;
@@ -6936,11 +6995,27 @@ function openEditPayment(id){
         <option value="pending"  ${p.status==='pending'?'selected':''}>En attente</option>
         <option value="rejected" ${p.status==='rejected'?'selected':''}>Rejeté</option>
       </select></div>
+    ${(()=>{
+      if (!epMonthsEditable(p, s)) return '';
+      const ms = paymentMonths(p).slice().sort();
+      let auto = ''; try { auto = ms.length ? '' : nPayMonthsText(p, nTuitionAlloc(p.student_id)); } catch(e){}
+      pmsInit('ep', ms, ms.length ? ms[0].slice(0,4) : (p.date ? String(p.date).slice(0,4) : null), p.student_id);
+      return `<div class="fg" id="epMonthWrap"><label class="fl">Mois couverts par ce versement</label>
+        ${ms.length ? '' : `<div style="font-size:11.5px;color:#b45309;margin-bottom:6px">⚠️ Aucun mois n'est indiqué sur ce versement${auto ? ' — il est compté automatiquement sur : ' + esc(auto.replace(/^auto : /,'')) : ''}. Cochez les bons mois pour le fixer.</div>`}
+        ${pmsHtml('ep')}</div>`;
+    })()}
     <div style="display:flex;gap:8px;margin-top:14px">
       <button class="fb fb-gold" style="flex:1" onclick="saveEditPayment('${p.id}')">💾 Enregistrer</button>
       <button class="fb fb-danger" onclick="deletePayment('${p.id}')">🗑️ Supprimer</button>
       <button class="fb fb-ghost" onclick="closeModal()">Annuler</button>
     </div>`);
+  if (document.getElementById('epMonthWrap')) pmsRefresh('ep');
+}
+/** Les mois se modifient pour les versements de mensualité (scolarité, internat, ou déjà rattachés à des mois). */
+function epMonthsEditable(p, s){
+  const l = nNormLabel(p && p.label);
+  if (l.indexOf('inscription') !== -1) return false;
+  return paymentMonths(p).length > 0 || l.indexOf('scolarit') !== -1 || l.indexOf('mensualit') !== -1 || l.indexOf('internat') !== -1;
 }
 function saveEditPayment(id){
   if (!canEditRecords()){ toast("⛔ Non autorisé."); return; }
@@ -6952,6 +7027,16 @@ function saveEditPayment(id){
   p.amount = amt;
   p.date   = document.getElementById('epDate').value || p.date;
   p.status = document.getElementById('epStatus').value;
+  if (document.getElementById('epMonthWrap') && PMS.ep){
+    const ms = pmsSorted('ep');
+    const before = paymentMonths(p).slice().sort().join(',');
+    if (ms.join(',') !== before){
+      p.for_months = ms.length ? ms : null;
+      p.for_month = ms[0] || null;
+      const s0 = DB.students.find(x=>x.id===p.student_id);
+      logAction('Mois d\'un paiement modifiés', (s0?(s0.first_name+' '+s0.last_name):'—') + ' — reçu ' + (p.receipt_no||'—') + ' : ' + (ms.length ? ms.map(monthYearLabel).join(', ') : 'aucun mois'));
+    }
+  }
   const nowApproved = p.status==='approved';
   // Garder les recettes (DB.transactions) cohérentes avec le statut/montant modifié.
   DB.transactions = DB.transactions.filter(t=>t.payment_id!==p.id);
@@ -6964,7 +7049,8 @@ function saveEditPayment(id){
   }
   p.edited_at = Date.now();
   p.edited_by = (currentUser()||{}).id || null;
-  saveDB(); closeModal(); toast('Paiement modifié.'); navigate('paiements');
+  saveDB(); closeModal(); toast('Paiement modifié.');
+  navigate(currentPage === 'cartes' ? 'cartes' : 'paiements');
 }
 function deletePayment(id){
   if (!canEditRecords()){ toast("⛔ Non autorisé."); return; }
@@ -8553,23 +8639,106 @@ function nombreEnLettres(n){
   return parts.join(' ');
 }
 
-/** Montant payé par mois (« AAAA-MM » → GNF) pour un élève — même règle que le
- *  suivi des dettes existant (paiements non rejetés, répartis sur les mois couverts). */
-function nPaidByMonth(studentId){
-  const map = {};
-  (DB.payments||[]).filter(p=>p.student_id===studentId && p.label==='Frais de scolarité' && p.status!=='rejected' && paymentMonths(p).length)
-    .forEach(p=>{
-      const ms = paymentMonths(p);
-      const share = Number(p.amount||0) / ms.length;
-      ms.forEach(ym=>{ map[ym] = (map[ym]||0) + share; });
-    });
-  return map;
+/* ---------------------------------------------------------------------
+   Versements de mensualité : UNE seule règle pour les cartes de paiement,
+   le suivi des dettes, les bilans et les rappels.
+   - versement avec mois indiqués → réparti sur ces mois (mois par mois,
+     jusqu'à la mensualité ; un excédent est partagé entre ces mois) ;
+   - versement de scolarité SANS mois (ancien paiement, motif modifié,
+     motif « Internat » d'un interne) → attribué automatiquement aux mois
+     dus les plus anciens non encore payés (puis aux mois suivants).
+   Rien n'est écrit dans la base : c'est un calcul d'affichage.
+   ------------------------------------------------------------------- */
+function nNormLabel(l){ return String(l||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim(); }
+/** Vrai si le versement règle des mensualités de l'élève. */
+function nIsTuitionPay(p, s){
+  if (!p || p.status === 'rejected') return false;
+  const l = nNormLabel(p.label);
+  if (l.indexOf('inscription') !== -1) return false;
+  if (paymentMonths(p).length) return true;
+  if (l.indexOf('scolarit') !== -1 || l.indexOf('mensualit') !== -1) return true;
+  if (l.indexOf('internat') !== -1 && s && s.category === 'internat') return true;   // pension de l'interne
+  return false;
 }
+/** Mois dus d'un élève (ordre chronologique) : de l'inscription (ou de l'arrivée) jusqu'à 12 mois après
+ *  le mois en cours, sans les mois entièrement couverts par une inactivité ni ceux qui suivent la sortie. */
+function nDueMonthsFor(s, untilYM){
+  const out = []; if (!s) return out;
+  const today = todayStr();
+  let anniv = false; try { anniv = oAnniv(s); } catch(e){}
+  const startStr = ((anniv ? oArrivalOf(s) : String(s.enrollment_date||'').slice(0,10)) || today);
+  let y = Number(startStr.slice(0,4)), m = Number(startStr.slice(5,7));
+  if (!y || !m){ const d = new Date(); y = d.getFullYear(); m = d.getMonth()+1; }
+  const cur = nTodayYM();
+  let ey = Number(cur.slice(0,4)) + 1, em = Number(cur.slice(5,7));
+  const end = (untilYM && untilYM > ymOf(ey, em)) ? untilYM : ymOf(ey, em);
+  const exit = s.exit_date ? String(s.exit_date).slice(0,10) : '';
+  let hasInact = false; try { hasInact = stInact(s).length > 0; } catch(e){}
+  let guard = 0;
+  while (guard < 240){
+    const ym = ymOf(y, m);
+    if (ym > end) break;
+    let per = { from: ym+'-01', to: ym+'-28' };
+    try { per = oPeriod(s, ym); } catch(e){}
+    if (exit && per.from >= exit) break;
+    let inactive = false;
+    if (hasInact){ try { inactive = stInactiveWhole(s, per.from, per.to); } catch(e){} }
+    if (!inactive) out.push(ym);
+    m++; if (m > 12){ m = 1; y++; }
+    guard++;
+  }
+  return out;
+}
+/** Répartition des versements d'un élève : { paid:{ym:GNF}, dates:{ym:date}, byPay:{payId:[{ym,amt}]}, auto:{payId:true}, left:{payId:GNF} }. */
+function nTuitionAlloc(studentId){
+  const s = (DB.students||[]).find(x=>x.id===studentId);
+  const fee = s ? Number(s.monthly_fee)||0 : 0;
+  const R = { paid:{}, dates:{}, byPay:{}, auto:{}, left:{} };
+  const pays = (DB.payments||[]).filter(p=>p.student_id===studentId && nIsTuitionPay(p, s))
+    .sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')) || String(a.receipt_no||'').localeCompare(String(b.receipt_no||'')));
+  const add = (p, ym, amt)=>{
+    if (!(amt > 0)) return;
+    R.paid[ym] = (R.paid[ym]||0) + amt;
+    if (String(p.date||'') > String(R.dates[ym]||'')) R.dates[ym] = String(p.date||'');
+    (R.byPay[p.id] = R.byPay[p.id] || []).push({ ym, amt });
+  };
+  // 1) Versements dont les mois sont indiqués.
+  pays.filter(p=>paymentMonths(p).length).forEach(p=>{
+    const ms = paymentMonths(p).map(String).filter((v,i,a)=>/^\d{4}-\d{2}$/.test(v) && a.indexOf(v)===i).sort();
+    if (!ms.length) return;
+    let r = Number(p.amount)||0;
+    if (fee > 0){
+      ms.forEach(ym=>{ const room = Math.max(0, fee - (R.paid[ym]||0)); const t = Math.min(room, r); if (t > 0){ add(p, ym, t); r -= t; } });
+      if (r > 0.0001) ms.forEach(ym=>add(p, ym, r/ms.length));      // excédent : partagé entre les mois indiqués
+    } else ms.forEach(ym=>add(p, ym, r/ms.length));
+  });
+  // 2) Versements sans mois : attribués aux mois dus les plus anciens.
+  const loose = pays.filter(p=>!paymentMonths(p).length);
+  if (loose.length){
+    const due = fee > 0 ? nDueMonthsFor(s) : [];
+    loose.forEach(p=>{
+      R.auto[p.id] = true;
+      let r = Number(p.amount)||0;
+      for (let i = 0; i < due.length && r > 0.0001; i++){
+        const ym = due[i]; const room = Math.max(0, fee - (R.paid[ym]||0));
+        if (room <= 0) continue;
+        const t = Math.min(room, r); add(p, ym, t); r -= t;
+      }
+      if (r > 0.0001) R.left[p.id] = r;
+    });
+  }
+  return R;
+}
+/** Montant payé par mois (« AAAA-MM » → GNF) pour un élève. */
+function nPaidByMonth(studentId){ return nTuitionAlloc(studentId).paid; }
 /** Dernière date de paiement enregistrée pour un mois donné. */
-function nPayDateForMonth(studentId, ym){
-  const l = (DB.payments||[]).filter(p=>p.student_id===studentId && p.status!=='rejected' && paymentMonths(p).includes(ym))
-    .map(p=>p.date||'').sort();
-  return l.length ? l[l.length-1] : '';
+function nPayDateForMonth(studentId, ym){ return nTuitionAlloc(studentId).dates[ym] || ''; }
+/** Mois couverts par un versement, tels qu'ils sont comptés (indiqués ou attribués automatiquement). */
+function nPayMonthsText(p, alloc){
+  if (paymentMonths(p).length) return paymentMonthsLabel(p);
+  const l = (alloc && alloc.byPay[p.id]) || [];
+  if (!l.length) return '';
+  return 'auto : ' + l.map(x=>monthYearLabel(x.ym)).filter((v,i,a)=>a.indexOf(v)===i).join(', ');
 }
 /** Situation de dette d'un élève : arriérés avant le mois « limite » (exclu). */
 function nDebtSituation(s, beforeYM){
@@ -9644,7 +9813,8 @@ function bilanDettePage(s){
   const unpaid = ledger.filter(m=>m.balance>0);
   const stCls = st => st==='payé'?'st-ok':(st==='partiel'?'st-pa':(st==='en cours'?'':'st-ko'));
   const stLbl = st => st==='payé'?'✔ Payé':(st==='partiel'?'◐ Partiel':(st==='impayé'?'✖ Impayé':(st==='en cours'?'En cours (fin de mois)':(st==='inactif'?'⏸ Inactif (non dû)':'—'))));
-  const pays = (DB.payments||[]).filter(p=>p.student_id===s.id && p.status!=='rejected' && p.label==='Frais de scolarité')
+  const alloc = nTuitionAlloc(s.id);
+  const pays = (DB.payments||[]).filter(p=>p.student_id===s.id && nIsTuitionPay(p, s))
     .sort((a,b)=>(a.date||'').localeCompare(b.date||''));
   const body = `
     <div class="sec">Identité de l'élève</div>
@@ -9662,7 +9832,7 @@ function bilanDettePage(s){
       ['<b>TOTAL</b>', `<b>${fmtGNF(due)}</b>`, `<b>${fmtGNF(paid)}</b>`, `<b style="color:#b91c1c">${fmtGNF(rest)}</b>`, ''])}
     ${pays.length?`<div class="sec">Versements enregistrés (scolarité)</div>
     ${a4Table(['Date','N° reçu','Mois couverts','Statut','Montant'],
-      pays.map(p=>[esc(p.date||''), esc(p.receipt_no||'—'), esc(paymentMonthsLabel(p)||'—'), p.status==='approved'?'Validé':'En attente', `<b>${fmtGNF(p.amount)}</b>`]))}`:''}
+      pays.map(p=>[esc(p.date||''), esc(p.receipt_no||'—'), esc(nPayMonthsText(p, alloc)||'—'), p.status==='approved'?'Validé':'En attente', `<b>${fmtGNF(p.amount)}</b>`]))}`:''}
     <div class="amount-box">
       ${rest>0
         ? `Arrêté le présent bilan à la somme de : <b class="big">${fmtGNF(rest)}</b><br>
@@ -9740,6 +9910,46 @@ function carteMonthState(s, ym, paidMap){
 }
 const CARTE_COL = { paye:'#16a34a', partiel:'#f59e0b', impaye:'#dc2626', avenir:'#cbd5e1', avant:'#e5e7eb' };
 
+/* ---- NB des cartes de l'internat (réglage facultatif du fondateur : clé carteConfig) ---- */
+const CARTE_NB_DEFAULT = "Le paiement des frais de scolarité est prioritaire et doit être effectué avant tout autre achat. Aucun achat ne sera fait pour le compte de l'élève tant que ses frais de scolarité ne sont pas à jour.";
+function carteNbCfg(){
+  const c = ((DB.carteConfig||{}).nbInternat) || {};
+  return { enabled: c.enabled !== false, text: String(c.text||'').trim() || CARTE_NB_DEFAULT };
+}
+/** Texte du NB pour un élève (internat uniquement, si le NB est activé). */
+function carteNbFor(s){ const c = carteNbCfg(); return (s && s.category === 'internat' && c.enabled) ? c.text : ''; }
+function carteOpenNbConfig(){
+  if (!isAdminOrAbove()){ toast('Réservé au fondateur / administrateur.'); return; }
+  const c = carteNbCfg();
+  openModal(`
+    <h3 style="margin:0 0 4px">📝 NB — cartes de paiement de l'internat</h3>
+    <p style="color:var(--muted);font-size:12.5px;margin:0 0 12px">Ce texte est imprimé <b>en gras</b> au bas des deux exemplaires (comptable et parent) de la carte de paiement de chaque élève de l'internat. Il apparaît aussi sur la carte numérique.</p>
+    <label style="display:flex;gap:9px;align-items:center;font-weight:700;margin-bottom:12px;cursor:pointer">
+      <input type="checkbox" id="cnbOn" ${c.enabled?'checked':''} style="width:18px;height:18px"> Afficher le NB sur les cartes de l'internat</label>
+    <div class="fg"><label class="fl">Texte du NB (« NB : » est ajouté automatiquement)</label>
+      <textarea class="fi" id="cnbText" rows="5" maxlength="320" style="resize:vertical;font-weight:700">${esc(c.text)}</textarea></div>
+    <div style="border:1.5px solid var(--brand);border-radius:10px;padding:9px 11px;font-size:12.5px;font-weight:800;margin-bottom:12px;background:rgba(212,160,60,.08)">Aperçu : NB : <span id="cnbPrev">${esc(c.text)}</span></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="fb fb-gold" style="flex:1;min-width:160px" onclick="carteSaveNbConfig()">💾 Enregistrer</button>
+      <button class="fb fb-ghost" onclick="document.getElementById('cnbText').value=CARTE_NB_DEFAULT;document.getElementById('cnbPrev').textContent=CARTE_NB_DEFAULT">↺ Texte proposé</button>
+      <button class="fb fb-ghost" onclick="closeModal()">Fermer</button>
+    </div>`);
+  const ta = document.getElementById('cnbText');
+  if (ta) ta.addEventListener('input', ()=>{ const p = document.getElementById('cnbPrev'); if (p) p.textContent = ta.value.trim() || CARTE_NB_DEFAULT; });
+}
+function carteSaveNbConfig(){
+  if (!isAdminOrAbove()){ toast('Réservé au fondateur / administrateur.'); return; }
+  const on = !!(document.getElementById('cnbOn')||{}).checked;
+  let txt = String((document.getElementById('cnbText')||{}).value||'').trim().replace(/^nb\s*:\s*/i, '');
+  if (!txt || txt === CARTE_NB_DEFAULT) txt = '';
+  DB.carteConfig = Object.assign({}, DB.carteConfig || {}, { nbInternat: { enabled: on, text: txt, updatedAt: Date.now() } });
+  saveDB();
+  logAction('Cartes de paiement', 'NB internat ' + (on ? 'affiché' : 'masqué') + (txt ? ' — texte personnalisé' : ''));
+  closeModal();
+  toast(on ? "✅ NB enregistré : il sera imprimé en gras sur les cartes de l'internat." : "NB masqué sur les cartes de l'internat.");
+  if (currentPage === 'cartes') renderCartesPaiement();
+}
+
 function renderCartesPaiement(){
   const list = cartesStudents();
   const yOpts = [CARTE.year-2, CARTE.year-1, CARTE.year, CARTE.year+1].filter((v,i,a)=>a.indexOf(v)===i)
@@ -9747,6 +9957,7 @@ function renderCartesPaiement(){
   const nSel = Object.keys(CARTE.sel).filter(k=>CARTE.sel[k]).length;
   document.getElementById('pageContent').innerHTML = `
     ${pageHead('Cartes de paiement', 'Carte annuelle en 2 exemplaires — un pour le comptable, un pour le parent (A4 paysage)',
+      (isAdminOrAbove()?`<button class="fb fb-ghost" onclick="carteOpenNbConfig()">📝 NB internat</button> `:'') +
       `<button class="fb fb-gold" onclick="printCartesSelection()">🖨️ Imprimer la sélection (<span id="carteSelCount">${nSel}</span>)</button>`)}
     <div class="search-bar" style="gap:8px;flex-wrap:wrap">
       <select class="fi" style="max-width:110px" onchange="CARTE.year=Number(this.value);renderCartesPaiement()">${yOpts}</select>
@@ -9810,7 +10021,27 @@ function printCartesSelection(){
 /** Carte numérique : le comptable « coche » un mois → formulaire de paiement pré-rempli. */
 function openCarteEleve(studentId){
   const s = DB.students.find(x=>x.id===studentId); if (!s) return;
-  const pm = nPaidByMonth(s.id);
+  const alloc = nTuitionAlloc(s.id);
+  const pm = alloc.paid;
+  const Ys = String(CARTE.year);
+  const yearPaid = Object.keys(pm).filter(ym=>ym.slice(0,4)===Ys).reduce((t,ym)=>t+pm[ym],0);
+  const canEd = canEditRecords();
+  const pays = (DB.payments||[]).filter(p=>p.student_id===s.id && nIsTuitionPay(p, s))
+    .filter(p=> String(p.date||'').slice(0,4)===Ys || (alloc.byPay[p.id]||[]).some(x=>x.ym.slice(0,4)===Ys) || paymentMonths(p).some(ym=>String(ym).slice(0,4)===Ys) || alloc.left[p.id])
+    .sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+  const nb = carteNbFor(s);
+  const paysHtml = pays.length ? `<div class="fl" style="margin:14px 0 6px">Versements comptés sur cette carte (${pays.length}) — total ${esc(Ys)} : <b>${fmtGNF(yearPaid)}</b></div>
+    ${pays.map(p=>{
+      const mt = nPayMonthsText(p, alloc);
+      return `<div style="border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:6px;font-size:12.5px;background:var(--panel)">
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>${fmtGNF(p.amount)}</b><span style="color:var(--muted)">${esc(p.date?nDateFr(p.date):'—')}</span></div>
+        <div style="font-size:11.5px;color:var(--muted)">${esc(p.label||'')} · reçu ${esc(p.receipt_no||'—')}${p.status==='pending'?' · en attente d’approbation':''}</div>
+        <div style="font-size:11.5px;margin-top:2px">${alloc.auto[p.id]
+          ? `<span class="badge badge-amber">Mois non indiqués</span> ${mt?esc('compté sur : '+mt.replace(/^auto : /,'')):''}`
+          : esc(mt ? 'Mois : ' + mt : '')}${alloc.left[p.id]?` <span style="color:#b45309">· ${fmtGNF(alloc.left[p.id])} non réparti</span>`:''}</div>
+        ${canEd?`<button class="fb fb-ghost fb-sm" style="width:100%;margin-top:7px" onclick="closeModal();openEditPayment('${p.id}')">✏️ ${alloc.auto[p.id]?'Indiquer les mois de ce versement':'Modifier les mois / le versement'}</button>`:''}
+      </div>`;
+    }).join('')}` : '';
   const canPay = ['fondateur','admin','comptable'].includes((currentUser()||{}).role) && paymentStatusOf(s)==='payant';
   const tiles = Array.from({length:12},(_,i)=>{
     const ym = ymOf(CARTE.year, i+1); const st = carteMonthState(s, ym, pm);
@@ -9828,6 +10059,8 @@ function openCarteEleve(studentId){
     <p style="color:var(--muted);font-size:12.5px;margin-bottom:12px">${esc(s.first_name+' '+s.last_name)} · ${esc(s.matricule||'')} · ${fmtGNF(s.monthly_fee)}/mois</p>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px">${tiles}</div>
     ${canPay?`<p style="font-size:11.5px;color:var(--muted);margin-top:10px">Touchez un mois non payé pour l'encaisser : le formulaire s'ouvre avec l'élève, le mois et le montant déjà remplis.</p>`:''}
+    ${nb?`<div style="border:1.5px solid var(--gold);border-radius:10px;padding:9px 11px;margin-top:10px;font-size:12.5px;font-weight:800;background:rgba(212,160,60,.08)">NB : ${esc(nb)}</div>`:''}
+    ${paysHtml}
     <div style="display:flex;gap:8px;margin-top:12px">
       <button class="fb fb-gold" style="flex:1" onclick="printCartes(['${s.id}'])">🖨️ Imprimer (2 exemplaires)</button>
       <button class="fb fb-ghost" onclick="closeModal()">Fermer</button>
@@ -9843,12 +10076,14 @@ function printCartes(ids){
   const P = nThemeColor(), A = nAccentColor();
   const Y = CARTE.year;
   const one = (s, who) => {
-    const pm = nPaidByMonth(s.id);
+    const alloc = nTuitionAlloc(s.id);
+    const pm = alloc.paid;
+    const nb = carteNbFor(s);
     const fee = Number(s.monthly_fee)||0;
     const rows = Array.from({length:12},(_,i)=>{
       const ym = ymOf(Y, i+1); const st = carteMonthState(s, ym, pm);
       const pre = CARTE.prefill && st.paid > 0;
-      const dt = pre ? nPayDateForMonth(s.id, ym) : '';
+      const dt = pre ? (alloc.dates[ym] || '') : '';
       return `<tr>
         <td class="mo">${esc(monthLabel(i+1))}</td>
         <td class="amt">${pre?fmtGNF(st.paid):''}</td>
@@ -9856,7 +10091,7 @@ function printCartes(ids){
         <td class="ck"><span class="box">${pre && st.st==='paye'?'✓':''}</span></td>
         <td class="sig"></td></tr>`;
     }).join('');
-    return `<div class="carte">
+    return `<div class="carte${nb?' has-nb':''}">
       <div class="band ${who==='parent'?'band-p':''}">${who==='parent'?'EXEMPLAIRE PARENT':'EXEMPLAIRE COMPTABLE'}</div>
       <div class="hd"><img src="${logo}" onerror="this.style.display='none'">
         <div><div class="nm">${esc(DB.centerName||'AGM')}</div><div class="ad">${esc(DB.centerAddress||'')}${DB.centerPhone?' · '+esc(DB.centerPhone):''}</div></div>
@@ -9875,6 +10110,7 @@ function printCartes(ids){
       </div>
       <table><thead><tr><th>Mois</th><th>Montant versé</th><th>Date</th><th>✓</th><th>Signature du comptable</th></tr></thead><tbody>${rows}</tbody></table>
       <div class="ftr"><div>Total annuel attendu : <b>${fee?fmtGNF(fee*12):'—'}</b><br><br>Total versé : ………………………… GNF</div><div>Cachet du markaz</div></div>
+      ${nb?`<div class="nb"><b>NB :</b> ${esc(nb)}</div>`:''}
       <div class="nt">Carte à présenter à chaque paiement. Le comptable inscrit le montant, coche le mois et signe.</div>
     </div>`;
   };
@@ -9916,6 +10152,9 @@ function printCartes(ids){
     .ftr{display:flex;justify-content:space-between;font-size:7.8pt;margin-top:2mm}
     .ftr div:last-child{width:32mm;height:10mm;border:1px dashed #999;border-radius:2mm;text-align:center;font-size:6.5pt;color:#888;padding-top:.8mm}
     .nt{font-size:6.5pt;color:#666;margin-top:1mm}
+    .carte.has-nb td{height:8.5mm}
+    .nb{font-size:7.6pt;font-weight:800;line-height:1.28;color:#111;border:1.4px solid ${P};background:#fff8e6;border-radius:2mm;padding:1.2mm 2.2mm;margin-top:1.6mm}
+    .nb b{color:${P}}
     .noprint{text-align:center;padding:10px}
     .noprint button{padding:9px 16px;border:0;border-radius:7px;font-weight:700;background:${P};color:#fff;cursor:pointer}
     @media print{.noprint{display:none!important}}
@@ -10198,8 +10437,25 @@ function stInact(s){
     .map(x=>({ from:String(x.from).slice(0,10), to:x.to ? String(x.to).slice(0,10) : '', note:String(x.note||'') }))
     .sort((a,b)=>a.from.localeCompare(b.from));
 }
-function stCurInact(s){ const l = stInact(s); const x = l[l.length-1]; return (x && !x.to) ? x : null; }
+/** Période d'inactivité EN COURS : celle qui contient aujourd'hui (début ≤ aujourd'hui < date de retour). */
+function stCurInact(s){
+  const t = todayStr();
+  const l = stInact(s).filter(x=> x.from <= t && (!x.to || x.to > t));
+  return l.length ? l[l.length-1] : null;
+}
 function stIsInactive(s){ return !!stCurInact(s); }
+/** Prochaine période d'inactivité prévue (début dans le futur). */
+function stNextInact(s){ const t = todayStr(); return stInact(s).find(x=> x.from > t) || null; }
+function oAddDays(str, n){ const d = oD(str); if (!d) return ''; d.setDate(d.getDate()+n); return oIso(d); }
+/** Fin d'une période = dernier jour d'inactivité (la veille de la date de retour enregistrée). */
+function stFinOf(x){ return x && x.to ? oAddDays(x.to, -1) : ''; }
+/** Libellé « Inactif du … au … » / « Inactif depuis le … ». */
+function stInactLabel(x, planned){
+  if (!x) return '';
+  const fin = stFinOf(x);
+  if (planned) return '⏳ Inactif prévu du ' + oFr(x.from) + (fin ? ' au ' + oFr(fin) : '');
+  return fin ? '⏸️ Inactif du ' + oFr(x.from) + ' au ' + oFr(fin) : '⏸️ Inactif depuis le ' + oFr(x.from);
+}
 function stInactMerged(s){
   const out = [];
   stInact(s).forEach(x=>{
@@ -10307,52 +10563,64 @@ function oLedger(s){
 /* ---- Affichage ---- */
 function stInactTag(s){
   const c = stCurInact(s);
-  return c ? ` <span class="badge badge-amber" title="${esc(c.note||'')}">⏸️ Inactif depuis le ${esc(oFr(c.from))}</span>` : '';
+  return c ? ` <span class="badge badge-amber" title="${esc(c.note||'')}">${esc(stInactLabel(c))}</span>` : '';
 }
 function stRowStatusHtml(s){
-  const c = stCurInact(s);
+  const c = stCurInact(s), nx = c ? null : stNextInact(s);
   const can = stCanStatus();
-  if (!c && !can) return '';
+  if (!c && !nx && !can) return '';
   return `<div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-top:4px">
-    ${c?`<span class="badge badge-amber" title="${esc(c.note||'')}">⏸️ Inactif depuis le ${esc(oFr(c.from))}</span>`:''}
+    ${c?`<span class="badge badge-amber" title="${esc(c.note||'')}">${esc(stInactLabel(c))}</span>`:''}
+    ${nx?`<span class="badge badge-slate" title="${esc(nx.note||'')}">${esc(stInactLabel(nx, true))}</span>`:''}
     ${can?`<button class="fb fb-ghost fb-sm" style="padding:3px 9px;font-size:11px" onclick="openStudentStatus('${s.id}')">🔄 Statut</button>`:''}
   </div>`;
 }
 function stViewFieldsHtml(s){
-  const c = stCurInact(s);
-  let h = `<div><div class="fl">Présence</div>${c?`<span class="badge badge-amber">⏸️ Inactif depuis le ${esc(oFr(c.from))}</span>`:'<span class="badge badge-green">Actif</span>'}</div>`;
+  const c = stCurInact(s), nx = c ? null : stNextInact(s);
+  let h = `<div><div class="fl">Présence</div>${c?`<span class="badge badge-amber">${esc(stInactLabel(c))}</span>`:'<span class="badge badge-green">Actif</span>'}${nx?` <span class="badge badge-slate">${esc(stInactLabel(nx, true))}</span>`:''}</div>`;
   if (s.category === 'internat' && (s.arrival_date || debtCfg().internatArrival))
     h += `<div><div class="fl">Arrivée au markaz</div>${esc(oFr(oArrivalOf(s))||'—')}</div>`;
   return h;
 }
 
-/** Fenêtre « Statut » : inactif / réactiver / quitté (→ Archives) / archiver. Cartes pleine largeur (téléphone). */
-function openStudentStatus(id){
+/** Fenêtre « Statut » : période d'inactivité (début + fin) / réactiver / quitté (→ Archives) / archiver.
+ *  Cartes pleine largeur (téléphone). editIdx : index (dans stInact) de la période en cours de modification. */
+function openStudentStatus(id, editIdx){
   ensureExt();
   const s = DB.students.find(x=>x.id===id); if (!s) return;
   if (!stCanStatus()){ toast('⛔ Réservé au fondateur / administrateur.'); return; }
   const cur = stCurInact(s), hist = stInact(s), today = todayStr();
+  const nx = cur ? null : stNextInact(s);
+  const ed = (typeof editIdx === 'number' && hist[editIdx]) ? hist[editIdx] : null;
   const name = (s.first_name||'')+' '+(s.last_name||'');
   const box = (c)=>`border:1px solid var(--line);border-left:4px solid ${c};border-radius:12px;padding:12px 13px;margin-bottom:10px;background:var(--panel)`;
   const help = 'font-size:12px;color:var(--muted);margin:4px 0 10px';
+  const periodCard = `<div style="${box('#f59e0b')}" id="stPeriodCard">
+      <b>${ed ? "✏️ Modifier la période d'inactivité" : "⏸️ Période d'inactivité"}</b>
+      <div style="${help}">${ed ? 'Corrigez le début, la fin ou le motif de cette période.' :
+        `Indiquez le <b>début</b> et la <b>fin</b> de l'inactivité (voyage, congé, maladie…). L'élève reste inscrit, mais <b>aucune mensualité ni dette</b> n'est calculée pour les mois entièrement couverts par la période, et il ne reçoit pas de rappel de paiement pendant ce temps. Laissez la fin vide si la date de retour n'est pas encore connue. Une période passée ou prévue peut aussi être enregistrée.`}</div>
+      <div class="fg2">
+        <div class="fg"><label class="fl">Début de l'inactivité *</label><input class="fi" type="date" id="stPdFrom" value="${esc(ed ? ed.from : today)}"></div>
+        <div class="fg"><label class="fl">Fin de l'inactivité (dernier jour)</label><input class="fi" type="date" id="stPdTo" value="${esc(ed ? stFinOf(ed) : '')}"></div>
+      </div>
+      <div class="fg"><label class="fl">Motif (facultatif)</label><input class="fi" id="stPdNote" value="${esc(ed ? ed.note : '')}" placeholder="Voyage, congé, maladie…"></div>
+      <div style="font-size:11.5px;color:var(--muted);margin:-2px 0 10px">L'élève redevient actif le lendemain de la date de fin.</div>
+      <button class="fb fb-gold" style="width:100%" onclick="stSavePeriod('${s.id}',${ed ? editIdx : -1})">💾 ${ed ? 'Enregistrer les modifications' : "Enregistrer la période d'inactivité"}</button>
+      ${ed ? `<button class="fb fb-ghost" style="width:100%;margin-top:6px" onclick="openStudentStatus('${s.id}')">Annuler la modification</button>` : ''}
+    </div>`;
   openModal(`
     <h3 style="margin:0 0 4px">🔄 Statut — ${esc(name)}</h3>
     <p style="color:var(--muted);font-size:12.5px;margin:0 0 12px">Matricule ${esc(s.matricule||'')} · ${s.category==='internat'?'Internat':'Externat'} ·
-      ${cur?`<span class="badge badge-amber">⏸️ Inactif depuis le ${esc(oFr(cur.from))}</span>`:'<span class="badge badge-green">Actif</span>'}</p>
-    ${cur ? `<div style="${box('#16a34a')}">
+      ${cur?`<span class="badge badge-amber">${esc(stInactLabel(cur))}</span>`:'<span class="badge badge-green">Actif</span>'}
+      ${nx?` <span class="badge badge-slate">${esc(stInactLabel(nx, true))}</span>`:''}</p>
+    ${ed ? periodCard : ''}
+    ${cur && !ed ? `<div style="${box('#16a34a')}">
         <b>▶️ Marquer actif</b>
-        <div style="${help}">L'élève est inactif depuis le ${esc(oFr(cur.from))}${cur.note?' ('+esc(cur.note)+')':''}. Les mensualités reprennent à partir de sa date de retour.</div>
+        <div style="${help}">${esc(stInactLabel(cur))}${cur.note?' ('+esc(cur.note)+')':''}. Si l'élève revient plus tôt, indiquez sa date de retour : les mensualités reprennent à partir de cette date.</div>
         <div class="fg"><label class="fl">Date du retour</label><input class="fi" type="date" id="stReDate" value="${today}" min="${esc(cur.from)}" max="${today}"></div>
         <button class="fb fb-green" style="width:100%" onclick="stReactivate('${s.id}')">▶️ Marquer actif</button>
-      </div>` : `<div style="${box('#f59e0b')}">
-        <b>⏸️ Marquer inactif</b>
-        <div style="${help}">L'élève reste inscrit, mais <b>aucune mensualité ni dette</b> n'est calculée pour lui à partir de cette date, jusqu'à ce qu'il soit marqué actif (les mois entièrement couverts par l'inactivité ne sont pas dus). Il ne reçoit pas de rappel de paiement pendant ce temps.</div>
-        <div class="fg2">
-          <div class="fg"><label class="fl">Début de l'inactivité</label><input class="fi" type="date" id="stInDate" value="${today}" max="${today}"></div>
-          <div class="fg"><label class="fl">Motif (facultatif)</label><input class="fi" id="stInNote" placeholder="Voyage, congé…"></div>
-        </div>
-        <button class="fb fb-gold" style="width:100%" onclick="stMarkInactive('${s.id}')">⏸️ Marquer inactif</button>
-      </div>`}
+      </div>` : ''}
+    ${!ed ? periodCard : ''}
     <div style="${box('#dc2626')}">
       <b>🚪 Marquer quitté</b>
       <div style="${help}">L'élève a quitté le markaz : il est envoyé <b>directement aux Archives</b> avec sa date de sortie. Plus aucune mensualité n'est due après cette date.</div>
@@ -10367,10 +10635,68 @@ function openStudentStatus(id){
       <div style="${help}">Même action que le bouton 🗄️ de la liste des élèves.</div>
       <button class="fb fb-ghost" style="width:100%" onclick="closeModal();archiveStudent('${s.id}')">🗄️ Archiver</button>
     </div>
-    ${hist.length?`<div class="fl" style="margin:6px 0">Historique des périodes d'inactivité</div>
-      ${hist.slice().reverse().map(x=>`<div style="font-size:12.5px;border:1px solid var(--line);border-radius:9px;padding:7px 10px;margin-bottom:5px">
-        ⏸️ du <b>${esc(oFr(x.from))}</b> ${x.to?`au <b>${esc(oFr(x.to))}</b> (retour)`:'— <b>en cours</b>'}${x.note?' · '+esc(x.note):''}</div>`).join('')}`:''}
+    ${hist.length?`<div class="fl" style="margin:6px 0">Périodes d'inactivité</div>
+      ${hist.map((x,i)=>({x,i})).reverse().map(({x,i})=>{
+        const isCur = cur && x.from===cur.from && x.to===cur.to;
+        const planned = x.from > today;
+        const fin = stFinOf(x);
+        return `<div style="font-size:12.5px;border:1px solid ${i===editIdx?'#f59e0b':'var(--line)'};border-radius:10px;padding:9px 11px;margin-bottom:6px;background:var(--panel)">
+          <div>⏸️ Du <b>${esc(oFr(x.from))}</b> ${fin?`au <b>${esc(oFr(fin))}</b>`:'— <b>fin non fixée</b>'}
+            ${isCur?' <span class="badge badge-amber">en cours</span>':(planned?' <span class="badge badge-slate">prévue</span>':'')}</div>
+          ${x.to?`<div style="color:var(--muted);font-size:11.5px">Retour le ${esc(oFr(x.to))}</div>`:''}
+          ${x.note?`<div style="color:var(--muted);font-size:11.5px">Motif : ${esc(x.note)}</div>`:''}
+          <div style="display:flex;gap:6px;margin-top:7px">
+            <button class="fb fb-ghost fb-sm" style="flex:1" onclick="openStudentStatus('${s.id}',${i})">✏️ Modifier</button>
+            <button class="fb fb-danger fb-sm" style="flex:1" onclick="stDeletePeriod('${s.id}',${i})">🗑️ Supprimer</button>
+          </div></div>`;
+      }).join('')}`:''}
     <div style="display:flex;gap:8px;margin-top:10px"><button class="fb fb-ghost" style="flex:1" onclick="closeModal()">Fermer</button></div>`);
+}
+/** Enregistre (ajout ou modification) une période d'inactivité : début + fin (dernier jour, facultatif). */
+function stSavePeriod(id, idx){
+  if (!stCanStatus()){ toast('⛔ Non autorisé.'); return; }
+  const s = DB.students.find(x=>x.id===id); if (!s) return;
+  const from = ((document.getElementById('stPdFrom')||{}).value||'').trim();
+  const fin  = ((document.getElementById('stPdTo')||{}).value||'').trim();
+  const note = ((document.getElementById('stPdNote')||{}).value||'').trim();
+  if (!oD(from)){ toast("Indiquez la date de début de l'inactivité."); return; }
+  if (fin && !oD(fin)){ toast("La date de fin n'est pas valide."); return; }
+  if (fin && fin < from){ toast('La fin ne peut pas précéder le début de la période.'); return; }
+  const to = fin ? oAddDays(fin, 1) : '';           // enregistré comme date de retour (lendemain de la fin)
+  const list = stInact(s);
+  const editing = (typeof idx === 'number' && idx >= 0 && list[idx]) ? idx : -1;
+  const END = '9999-12-31';
+  const clash = list.find((o,k)=> k !== editing && from < (o.to || END) && o.from < (to || END));
+  if (clash){
+    toast('Cette période chevauche celle ' + (clash.to ? 'du ' + oFr(clash.from) + ' au ' + oFr(stFinOf(clash)) : 'commencée le ' + oFr(clash.from) + ' (fin non fixée)') + '. Modifiez plutôt cette période.');
+    return;
+  }
+  const before = editing >= 0 ? list[editing] : null;
+  if (editing >= 0) list[editing] = { from, to, note };
+  else list.push({ from, to, note });
+  list.sort((a,b)=>a.from.localeCompare(b.from));
+  s.inactivity = list;
+  saveDB();
+  const who = (s.first_name||'')+' '+(s.last_name||'')+' ('+(s.matricule||'')+')';
+  const txt = 'du ' + oFr(from) + (fin ? ' au ' + oFr(fin) : ' (fin non fixée)') + (note ? ' — ' + note : '');
+  logAction(before ? "Période d'inactivité modifiée" : 'Élève inactif', who + ' — ' + txt +
+    (before ? ' (avant : du ' + oFr(before.from) + (before.to ? ' au ' + oFr(stFinOf(before)) : '') + ')' : ''));
+  toast('⏸️ ' + (s.first_name||'') + ' : inactivité ' + txt + '. Les mois entièrement couverts ne sont pas dus.');
+  oRefresh();
+  openStudentStatus(id);
+}
+function stDeletePeriod(id, idx){
+  if (!stCanStatus()){ toast('⛔ Non autorisé.'); return; }
+  const s = DB.students.find(x=>x.id===id); if (!s) return;
+  const list = stInact(s); const x = list[idx]; if (!x) return;
+  if (!confirm("Supprimer la période d'inactivité du " + oFr(x.from) + (x.to ? ' au ' + oFr(stFinOf(x)) : '') + ' ?\nLes mensualités de ces mois redeviennent dues.')) return;
+  list.splice(idx, 1);
+  s.inactivity = list;
+  saveDB();
+  logAction("Période d'inactivité supprimée", (s.first_name||'')+' '+(s.last_name||'')+' ('+(s.matricule||'')+') — du '+oFr(x.from)+(x.to?' au '+oFr(stFinOf(x)):''));
+  toast("Période d'inactivité supprimée.");
+  oRefresh();
+  openStudentStatus(id);
 }
 function stMarkInactive(id){
   if (!stCanStatus()){ toast('⛔ Non autorisé.'); return; }
@@ -10395,13 +10721,14 @@ function stReactivate(id){
   if (!stCanStatus()){ toast('⛔ Non autorisé.'); return; }
   const s = DB.students.find(x=>x.id===id); if (!s) return;
   const d = ((document.getElementById('stReDate')||{}).value||'').trim();
-  const list = stInact(s); const cur = list[list.length-1];
-  if (!cur || cur.to){ toast("Cet élève n'est pas inactif."); return; }
+  const list = stInact(s); const cur = stCurInact(s);
+  const k = cur ? list.findIndex(x=>x.from===cur.from && x.to===cur.to) : -1;
+  if (k < 0){ toast("Cet élève n'est pas inactif."); return; }
   if (!oD(d)){ toast('Indiquez la date du retour.'); return; }
   if (d > todayStr()){ toast('La date ne peut pas être dans le futur.'); return; }
   if (d < cur.from){ toast("Le retour ne peut pas précéder le début de l'inactivité ("+oFr(cur.from)+').'); return; }
-  if (d === cur.from) list.pop();          // retour le jour même : la période est annulée
-  else cur.to = d;
+  if (d === cur.from) list.splice(k, 1);   // retour le jour même : la période est annulée
+  else list[k].to = d;
   s.inactivity = list;
   saveDB();
   logAction('Élève réactivé', (s.first_name||'')+' '+(s.last_name||'')+' ('+(s.matricule||'')+') — retour le '+oFr(d));
@@ -10418,8 +10745,9 @@ function stMarkLeft(id){
   if (d > todayStr()){ toast('La date de sortie ne peut pas être dans le futur.'); return; }
   if (s.enrollment_date && d < String(s.enrollment_date).slice(0,10)){ toast("La date de sortie ne peut pas précéder l'inscription ("+oFr(s.enrollment_date)+').'); return; }
   if (!confirm((s.first_name||'')+' '+(s.last_name||'')+' a quitté le markaz le '+oFr(d)+' ?\nIl sera envoyé directement aux Archives.')) return;
-  const list = stInact(s); const cur = list[list.length-1];
-  if (cur && !cur.to){ cur.to = d > cur.from ? d : cur.from; if (cur.to === cur.from) list.pop(); s.inactivity = list; }
+  const list = stInact(s);
+  const k = list.findIndex(x=> x.from <= d && (!x.to || x.to > d));
+  if (k >= 0){ if (d > list[k].from) list[k].to = d; else list.splice(k, 1); s.inactivity = list; }
   s.exit_date = d;
   if (reason) s.exit_reason = reason; else delete s.exit_reason;
   s.status = 'non_actif';
@@ -10805,7 +11133,7 @@ function rbLessonExtra(p){
 }
 
 /* ---- Fiches imprimables (planches) ---- */
-function rbShowSheet(title, sections, s){
+function rbShowSheet(title, sections, s, notice){
   const primary = (DB.theme&&DB.theme.primary)||'#15803d';
   const accent  = (DB.theme&&DB.theme.accent)||'#d4a03c';
   const who = ((s&&s.first_name)||'')+' '+((s&&s.last_name)||'');
@@ -10832,10 +11160,12 @@ function rbShowSheet(title, sections, s){
     .hcell{min-width:96px;padding:8px 16px;display:flex;align-items:center;justify-content:center;background:#fff;
       border:1px solid #e7e1cf;border-radius:14px;font-family:'Amiri',serif;font-size:40px;line-height:1.7;color:#1a1a1a;white-space:pre}
     .hcell.big{width:110px;height:110px;padding:0;font-size:62px}
-    @media print{.bar{display:none}body{background:#fff;padding:0}}
+    .ntc{max-width:190mm;margin:0 auto 14px;direction:ltr;background:#fff7e6;border:1.5px solid #f59e0b;border-radius:12px;padding:10px 14px;font-size:13px;line-height:1.45;color:#5b3a00}
+    @media print{.bar{display:none}body{background:#fff;padding:0}.ntc{display:none}}
   </style></head><body>
     <div class="bar"><button onclick="window.print()">🖨️ Imprimer PDF A4</button>
     <button class="alt" onclick="window.close()">✖ Fermer</button></div>
+    ${notice?`<div class="ntc">${notice}</div>`:''}
     <div class="top"><h1>${esc(title)}</h1><p>${esc(who)} · ${esc(DB.centerName||'AGM')}</p></div>
     ${body}
   </body></html>`);
@@ -10849,17 +11179,418 @@ function rbOpenSheet(s, p, which){
   const c = rbCur(p);
   if (which === 'old'){
     if (c.i <= 0){ toast("Aucune ancienne leçon : l'élève débute le livre."); return; }
-    const secs = [c.i-1, c.i-2].filter(i=>i>=0).map(i=>rbSection(c, i)).filter(Boolean).reverse();
-    rbShowSheet('Ancienne leçon — ' + c.book.short, secs, s);
+    const idx = [c.i-1, c.i-2].filter(i=>i>=0).reverse();
+    if (rbkOpenSteps(c, idx, 'Ancienne leçon — ' + c.book.short, s)) return;
+    const secs = idx.map(i=>rbSection(c, i)).filter(Boolean);
+    rbShowSheet('Ancienne leçon — ' + c.book.short, secs, s, rbkNotice(c, idx));
     return;
   }
-  rbShowSheet('Nouvelle leçon — ' + c.book.short, [rbSection(c, c.i)].filter(Boolean), s);
+  if (rbkOpenSteps(c, [c.i], 'Nouvelle leçon — ' + c.book.short, s)) return;
+  rbShowSheet('Nouvelle leçon — ' + c.book.short, [rbSection(c, c.i)].filter(Boolean), s, rbkNotice(c, [c.i]));
 }
 function rbOpenLessonSheet(l, s){
   const id = RB_BOOKS.some(b=>b.id===l.book_id) ? l.book_id : rbCfg().book;
   const steps = rbSteps(id);
   const c = { id, book: rbBook(id), steps, i: Math.max(0, Math.min(steps.length-1, Number(l.book_step)||0)), L: rbLessons(id).length };
-  rbShowSheet('À restituer — ' + c.book.short, [rbSection(c, c.i)].filter(Boolean), s);
+  if (rbkOpenSteps(c, [c.i], 'À restituer — ' + c.book.short, s)) return;
+  rbShowSheet('À restituer — ' + c.book.short, [rbSection(c, c.i)].filter(Boolean), s, rbkNotice(c, [c.i]));
+}
+
+/* =====================================================================
+   VRAIS LIVRES — les pages réelles du livre choisi s'ouvrent à chaque leçon
+   Le markaz importe UNE fois son exemplaire du livre (fichier PDF ou photos
+   des pages). Chaque page est gardée sur l'appareil (IndexedDB) et envoyée
+   sur le cloud du markaz (Firebase Storage) pour tous les appareils.
+   Clé facultative : DB.readingBooks.scans[livre] = { name, n, pages:[{u,k}] }.
+   Chaque leçon reçoit ses pages dans ✏️ Leçons du livre (champ « pg »,
+   ex. « 12-15 » ou, partie par partie, « 12-13, 14, 15 »).
+   Sans import : planche générée, clairement signalée comme telle.
+   ===================================================================== */
+const RBK_DBNAME = 'agm_books', RBK_STORE = 'pages';
+let _rbkDbP = null;
+function rbkDb(){
+  if (_rbkDbP) return _rbkDbP;
+  _rbkDbP = new Promise((res, rej)=>{
+    try {
+      const rq = indexedDB.open(RBK_DBNAME, 1);
+      rq.onupgradeneeded = ()=>{ const db = rq.result; if (!db.objectStoreNames.contains(RBK_STORE)) db.createObjectStore(RBK_STORE); };
+      rq.onsuccess = ()=>res(rq.result);
+      rq.onerror = ()=>rej(rq.error);
+    } catch(e){ rej(e); }
+  });
+  _rbkDbP.catch(()=>{ _rbkDbP = null; });
+  return _rbkDbP;
+}
+function rbkPut(key, val){
+  return rbkDb().then(db=>new Promise(res=>{
+    try { const tx = db.transaction(RBK_STORE, 'readwrite'); tx.objectStore(RBK_STORE).put(val, key);
+      tx.oncomplete = ()=>res(true); tx.onerror = ()=>res(false); tx.onabort = ()=>res(false); } catch(e){ res(false); }
+  })).catch(()=>false);
+}
+function rbkGet(key){
+  if (!key) return Promise.resolve(null);
+  return rbkDb().then(db=>new Promise(res=>{
+    try { const rq = db.transaction(RBK_STORE, 'readonly').objectStore(RBK_STORE).get(key);
+      rq.onsuccess = ()=>res(rq.result || null); rq.onerror = ()=>res(null); } catch(e){ res(null); }
+  })).catch(()=>null);
+}
+function rbkDelPrefix(prefix){
+  return rbkDb().then(db=>new Promise(res=>{
+    try { const tx = db.transaction(RBK_STORE, 'readwrite');
+      tx.objectStore(RBK_STORE).delete(IDBKeyRange.bound(prefix, prefix + '\uffff'));
+      tx.oncomplete = ()=>res(true); tx.onerror = ()=>res(false); } catch(e){ res(false); }
+  })).catch(()=>false);
+}
+/** Livre importé (ou null). */
+function rbkScan(id){
+  const c = DB.readingBooks || {};
+  const s = c.scans && c.scans[id];
+  return (s && nArr(s.pages).length) ? s : null;
+}
+function rbkPagesOf(id){ const s = rbkScan(id); return s ? nArr(s.pages) : []; }
+/** « 12-15 » / « 12-13, 14, 15 » → [[12,13],[14,14],[15,15]] */
+function rbkParse(str){
+  return String(str||'').split(/[,;\/]+/).map(x=>x.trim()).filter(Boolean).map(x=>{
+    const m = x.match(/^(?:p\.?\s*)?(\d{1,4})\s*(?:(?:-|–|—|à|a)\s*(\d{1,4}))?$/i);
+    if (!m) return null;
+    let a = Number(m[1]), b = m[2] ? Number(m[2]) : a;
+    if (b < a){ const t = a; a = b; b = t; }
+    if (a < 1) return null;
+    return [a, Math.min(b, a + 80)];
+  }).filter(Boolean);
+}
+/** Numéros des pages d'une partie de leçon : plages données partie par partie, sinon pages de la leçon réparties entre ses parties. */
+function rbkPartPages(pg, p, n){
+  const rs = rbkParse(pg); if (!rs.length) return [];
+  n = Math.max(1, n||1); p = Math.max(0, Math.min(n-1, p||0));
+  const span = r => { const o = []; for (let k = r[0]; k <= r[1]; k++) o.push(k); return o; };
+  if (rs.length === n) return span(rs[p]);
+  const all = []; rs.forEach(r=>span(r).forEach(k=>{ if (all.indexOf(k) === -1) all.push(k); }));
+  if (n <= 1) return all;
+  const a = Math.floor(p*all.length/n), b = Math.floor((p+1)*all.length/n);
+  const sl = all.slice(a, b);
+  return sl.length ? sl : [all[Math.min(all.length-1, a)]];
+}
+function rbkStepPages(id, st){
+  if (!st) return [];
+  const L = rbLessons(id)[st.li];
+  return L && L.pg ? rbkPartPages(L.pg, st.p, st.n) : [];
+}
+function rbkPagesTxt(nums){
+  if (!nums.length) return '';
+  const a = nums[0], b = nums[nums.length-1];
+  return nums.length === 1 ? 'page ' + a : (b - a + 1 === nums.length ? 'pages ' + a + ' à ' + b : 'pages ' + nums.join(', '));
+}
+/** Message affiché au-dessus d'une planche générée (jamais présentée comme une page du livre). */
+function rbkNotice(c, idx){
+  if (!c || !c.book || !c.book.lessons) return '';
+  const adm = isAdminOrAbove();
+  if (!rbkScan(c.id))
+    return `ℹ️ <b>Planche d'exercices préparée par l'application</b> d'après le thème de la leçon — ce n'est pas la page du livre « ${esc(c.book.name)} ». `
+      + (adm ? `Pour ouvrir les <b>vraies pages du livre</b>, importez votre exemplaire (PDF ou photos) : Réglages ▸ 📘 Livre de lecture ▸ 📄 Vrais livres.`
+             : `Le fondateur peut importer le vrai livre (Réglages ▸ 📘 Livre de lecture) pour que ses pages s'ouvrent ici.`);
+  return `ℹ️ <b>Les pages de cette leçon ne sont pas encore indiquées</b> : planche préparée par l'application. `
+    + (adm ? `Indiquez les pages du livre pour chaque leçon : Réglages ▸ 📘 Livre de lecture ▸ ✏️ Pages des leçons.` : `Le fondateur doit indiquer les pages de chaque leçon (📘 Livre de lecture).`);
+}
+/** Ouvre les vraies pages des étapes demandées ; faux si le livre n'est pas importé ou les pages non indiquées. */
+function rbkOpenSteps(c, idx, title, s){
+  if (!c || !rbkScan(c.id)) return false;
+  const groups = [];
+  idx.forEach(i=>{
+    const st = c.steps[i]; if (!st) return;
+    const nums = rbkStepPages(c.id, st);
+    if (nums.length) groups.push({ head: c.book.short + ' — ' + rbStepLabel(st, c.L), ar: st.ar, nums });
+  });
+  if (!groups.length) return false;
+  rbkShowPages(c.id, title, groups, s);
+  return true;
+}
+/** Source d'une page : copie sur l'appareil si elle existe, sinon adresse cloud. */
+async function rbkPageSrc(entry){
+  if (!entry) return '';
+  let local = null;
+  try { local = await rbkGet(entry.k); } catch(e){}
+  return local || entry.u || '';
+}
+/** Fenêtre de lecture : les pages réelles du livre (imprimables en A4). */
+function rbkShowPages(id, title, groups, s, opts){
+  opts = opts || {};
+  const primary = (DB.theme&&DB.theme.primary)||'#15803d';
+  const who = ((s&&s.first_name)||'')+' '+((s&&s.last_name)||'');
+  const b = rbBook(id);
+  const w = window.open('', '_blank', 'width=900,height=950');
+  if (!w){ toast('Autorisez les fenêtres pop-up.'); return; }
+  w.document.write(`<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>${esc(title)}</title></head>
+    <body style="font-family:Arial,sans-serif;padding:30px;text-align:center;color:#334">⏳ Ouverture des pages du livre…</body></html>`);
+  w.document.close();
+  (async ()=>{
+    const pages = rbkPagesOf(id);
+    const seen = {};
+    const parts = [];
+    for (const g of groups){
+      const imgs = [];
+      for (const n of g.nums){
+        if (seen[n]){ imgs.push(`<div class="same">Page ${n} : voir plus haut</div>`); continue; }
+        seen[n] = true;
+        const src = await rbkPageSrc(pages[n-1]);
+        imgs.push(src
+          ? `<figure class="pg"><img src="${esc(src)}" alt="Page ${n}" loading="lazy"><figcaption>Page ${n}</figcaption></figure>`
+          : `<div class="miss">Page ${n} : ${pages[n-1] ? "pas encore disponible sur cet appareil (envoi au cloud en attente depuis l'appareil qui a importé le livre)" : "n'existe pas dans le livre importé (" + pages.length + " pages)"}.</div>`);
+      }
+      parts.push(`<div class="sec"><div><div class="st">${esc(g.head)}</div><div class="sp">${esc(opts.browse ? '' : rbkPagesTxt(g.nums) + ' du livre')}</div></div>${g.ar?`<div class="sa">${esc(g.ar)}</div>`:''}</div>${imgs.join('')}`);
+    }
+    try {
+      w.document.open();
+      w.document.write(`<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
+      <link href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&display=swap" rel="stylesheet">
+      <style>
+        *{ -webkit-print-color-adjust:exact!important; print-color-adjust:exact!important; box-sizing:border-box }
+        @page{size:A4;margin:8mm}
+        body{margin:0;padding:14px;background:#eef1ef;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a}
+        .bar{display:flex;gap:8px;justify-content:center;margin-bottom:12px;flex-wrap:wrap}
+        button{padding:10px 16px;border:0;border-radius:8px;font-weight:700;cursor:pointer;background:${primary};color:#fff}
+        button.alt{background:#fff;color:${primary};border:1px solid #cbd5d0}
+        .top{background:${primary};color:#fff;border-radius:12px;padding:12px 18px;margin:0 auto 12px;max-width:800px}
+        .top h1{margin:0;font-size:18px}.top p{margin:3px 0 0;font-size:12.5px;opacity:.92}
+        .sec{max-width:800px;margin:14px auto 8px;display:flex;justify-content:space-between;gap:10px;align-items:flex-end}
+        .st{font-weight:800;font-size:14px;color:${primary}} .sp{font-size:12px;color:#556}
+        .sa{font-family:'Amiri',serif;font-size:21px;direction:rtl}
+        .pg{max-width:800px;margin:0 auto 12px;background:#fff;border-radius:10px;padding:6px;box-shadow:0 2px 10px rgba(0,0,0,.08);page-break-inside:avoid;break-inside:avoid}
+        .pg img{display:block;width:100%;height:auto;border-radius:6px}
+        .pg figcaption{font-size:11px;color:#667;text-align:center;margin-top:4px}
+        .miss,.same{max-width:800px;margin:0 auto 10px;padding:12px;border:1.5px dashed #f59e0b;border-radius:10px;background:#fff7e6;font-size:13px;color:#5b3a00}
+        .same{border-color:#cbd5d0;background:#fff;color:#667}
+        @media print{.bar{display:none}body{background:#fff;padding:0}.pg{box-shadow:none;padding:0;margin:0 auto;page-break-after:always;break-after:page}.pg:last-child{page-break-after:auto;break-after:auto}.pg img{max-height:270mm;width:auto;max-width:100%;margin:0 auto}.same{display:none}}
+      </style></head><body>
+        <div class="bar"><button onclick="window.print()">🖨️ Imprimer / PDF</button><button class="alt" onclick="window.close()">✖ Fermer</button></div>
+        <div class="top"><h1>${esc(title)}</h1><p>${who.trim()?esc(who)+' · ':''}📘 ${esc(b.name)} · ${esc(DB.centerName||'AGM')}</p></div>
+        ${parts.join('')}
+      </body></html>`);
+      w.document.close();
+    } catch(e){}
+  })();
+}
+
+/* ---- Import du livre (PDF ou photos) ---- */
+function rbkLoadPdfJs(){
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  return new Promise((res, rej)=>{
+    const sc = document.createElement('script');
+    sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    sc.onload = ()=>{
+      try { window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; res(window.pdfjsLib); }
+      catch(e){ rej(e); }
+    };
+    sc.onerror = ()=>rej(new Error('pdf.js'));
+    document.head.appendChild(sc);
+  });
+}
+function rbkFileToDataURL(file){
+  return new Promise((res, rej)=>{ const r = new FileReader(); r.onload = ()=>res(r.result); r.onerror = ()=>rej(r.error); r.readAsDataURL(file); });
+}
+/** Photo d'une page → JPEG allégé (largeur max. 1240 px). */
+function rbkImageToJpeg(file){
+  return rbkFileToDataURL(file).then(data=>new Promise((res, rej)=>{
+    const img = new Image();
+    img.onload = ()=>{
+      try {
+        const k = Math.min(1, 1240 / (img.naturalWidth || img.width || 1240));
+        const cv = document.createElement('canvas');
+        cv.width = Math.max(1, Math.round((img.naturalWidth||img.width) * k));
+        cv.height = Math.max(1, Math.round((img.naturalHeight||img.height) * k));
+        const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height);
+        cx.drawImage(img, 0, 0, cv.width, cv.height);
+        res(cv.toDataURL('image/jpeg', 0.75));
+      } catch(e){ rej(e); }
+    };
+    img.onerror = ()=>rej(new Error('image'));
+    img.src = data;
+  }));
+}
+let RBK_BUSY = false;
+function rbkOpenImport(id){
+  if (!isAdminOrAbove()){ toast('Réservé au fondateur / administrateur.'); return; }
+  const b = rbBook(id); if (!b.lessons) return;
+  const sc = rbkScan(id);
+  openModal(`
+    <h3 style="margin:0 0 4px">📥 Importer le vrai livre</h3>
+    <p style="color:var(--muted);font-size:12.5px;margin:0 0 10px"><b>${esc(b.name)}</b> <span style="font-family:'Amiri',serif;font-size:16px">${esc(b.ar)}</span></p>
+    <div style="font-size:12.5px;line-height:1.5;margin-bottom:12px">Choisissez <b>le fichier PDF</b> du livre utilisé au markaz, ou <b>les photos de ses pages</b> (dans l'ordre des pages). Les pages sont gardées sur cet appareil et envoyées dans le cloud du markaz : tous les appareils les ouvriront ensuite à chaque leçon.</div>
+    ${sc?`<div style="border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-bottom:10px;font-size:12.5px">Déjà importé : <b>${nArr(sc.pages).length} pages</b>${sc.name?' ('+esc(sc.name)+')':''}
+      <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="radio" name="rbkMode" value="replace" checked> Remplacer toutes les pages</label>
+      <label style="display:flex;gap:8px;align-items:center;margin-top:4px"><input type="radio" name="rbkMode" value="append"> Ajouter à la suite (pages manquantes)</label></div>`:''}
+    <div class="fg"><label class="fl">Fichier PDF ou photos des pages</label>
+      <input class="fi" type="file" id="rbkFile" accept="application/pdf,image/*" multiple></div>
+    <div id="rbkProg" style="font-size:12.5px;margin:6px 0 10px;color:var(--muted)">La lecture d'un PDF demande une connexion Internet la première fois.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="fb fb-gold" style="flex:1;min-width:160px" id="rbkGo" onclick="rbkStartImport('${id}')">📥 Importer</button>
+      <button class="fb fb-ghost" onclick="rbOpenConfig()">← Retour</button>
+    </div>`);
+}
+function rbkProg(html){ const el = document.getElementById('rbkProg'); if (el) el.innerHTML = html; }
+async function rbkStartImport(id){
+  if (!isAdminOrAbove()) return;
+  if (RBK_BUSY){ toast('Import déjà en cours…'); return; }
+  const inp = document.getElementById('rbkFile');
+  const files = inp && inp.files ? Array.from(inp.files) : [];
+  if (!files.length){ toast('Choisissez le fichier PDF ou les photos des pages.'); return; }
+  const mode = ((document.querySelector('input[name="rbkMode"]:checked')||{}).value) || 'replace';
+  const pdf = files.find(f=>/pdf$/i.test(f.type) || /\.pdf$/i.test(f.name));
+  const imgs = files.filter(f=>/^image\//i.test(f.type) || /\.(jpe?g|png|webp|heic)$/i.test(f.name))
+    .sort((a,b)=>a.name.localeCompare(b.name, undefined, { numeric:true, sensitivity:'base' }));
+  if (!pdf && !imgs.length){ toast('Format non reconnu : choisissez un PDF ou des photos.'); return; }
+  RBK_BUSY = true;
+  const go = document.getElementById('rbkGo'); if (go) go.disabled = true;
+  const stamp = Date.now().toString(36);
+  const old = rbkScan(id);
+  const keep = (mode === 'append' && old) ? nArr(old.pages).slice() : [];
+  const out = [];
+  const inflight = new Set(), allUp = [];
+  const pushPage = async (data)=>{
+    const idx = keep.length + out.length + 1;
+    const k = id + '|' + stamp + '|' + String(idx).padStart(4,'0');
+    await rbkPut(k, data);
+    const entry = { k, u:'' };
+    out.push(entry);
+    if (cloudLinked()){
+      // 3 envois au maximum en parallèle vers le cloud du markaz
+      const tr = uploadPhotoToStorage('books', id + '_' + stamp + '_p' + String(idx).padStart(4,'0'), data)
+        .then(url=>{ if (url) entry.u = url; }).catch(()=>{}).then(()=>{ inflight.delete(tr); });
+      inflight.add(tr); allUp.push(tr);
+      if (inflight.size >= 3) await Promise.race(Array.from(inflight));
+    }
+  };
+  try {
+    if (pdf){
+      rbkProg('⏳ Chargement du lecteur PDF…');
+      const lib = await rbkLoadPdfJs();
+      const buf = await pdf.arrayBuffer();
+      const doc = await lib.getDocument({ data: buf }).promise;
+      const N = Math.min(doc.numPages, 500);
+      const cv = document.createElement('canvas');
+      for (let i = 1; i <= N; i++){
+        rbkProg(`⏳ Page ${i} / ${N}…`);
+        const page = await doc.getPage(i);
+        const v1 = page.getViewport({ scale: 1 });
+        const vp = page.getViewport({ scale: Math.min(2.5, 1240 / v1.width) });
+        cv.width = Math.round(vp.width); cv.height = Math.round(vp.height);
+        const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height);
+        await page.render({ canvasContext: cx, viewport: vp }).promise;
+        await pushPage(cv.toDataURL('image/jpeg', 0.72));
+        try { page.cleanup(); } catch(e){}
+      }
+      try { doc.destroy(); } catch(e){}
+    } else {
+      for (let i = 0; i < imgs.length; i++){
+        rbkProg(`⏳ Photo ${i+1} / ${imgs.length}…`);
+        try { await pushPage(await rbkImageToJpeg(imgs[i])); } catch(e){ toast('Photo ignorée (illisible) : ' + imgs[i].name); }
+      }
+    }
+    if (!out.length) throw new Error('vide');
+    rbkProg(`⏳ Envoi des pages dans le cloud du markaz…`);
+    await Promise.all(allUp);
+    const scans = Object.assign({}, (DB.readingBooks||{}).scans || {});
+    const pages = keep.concat(out);
+    scans[id] = { name: pdf ? pdf.name : (imgs.length + ' photo(s)'), n: pages.length, pages, stamp, updatedAt: Date.now(), by: (currentUser()||{}).id || null };
+    DB.readingBooks = Object.assign({}, DB.readingBooks || {}, { scans, updatedAt: Date.now() });
+    saveDB();
+    if (old && mode !== 'append'){            // anciennes pages remplacées : nettoyage (appareil + cloud)
+      nArr(old.pages).forEach(p=>{ try { deleteStorageFileByUrl(p.u); } catch(e){} });
+      if (old.stamp) rbkDelPrefix(id + '|' + old.stamp + '|');
+    }
+    logAction('Livre de lecture', 'Vrai livre importé : ' + rbBook(id).name + ' (' + pages.length + ' pages)');
+    const pend = out.filter(e=>!e.u).length;
+    toast('✅ ' + out.length + ' page(s) importée(s)' + (pend ? ' — ' + pend + ' seront envoyées au cloud dès que la connexion le permet.' : '.'));
+    RBK_BUSY = false;
+    rbOpenEditor(id);                          // étape suivante : indiquer les pages de chaque leçon
+  } catch(e){
+    RBK_BUSY = false;
+    if (go) go.disabled = false;
+    const offline = (typeof navigator !== 'undefined' && navigator.onLine === false);
+    rbkProg(`<span style="color:#b91c1c">❌ Import impossible${pdf ? (offline ? ' : connexion Internet requise pour lire le PDF.' : ' : le PDF n’a pas pu être lu (vous pouvez importer des photos des pages).') : '.'}</span>`);
+    toast('Import du livre impossible.');
+  }
+}
+/** Envoie au cloud les pages restées sur cet appareil (import fait hors ligne). */
+let RBK_UPLOADING = false;
+async function rbkUploadPending(){
+  if (RBK_UPLOADING || !cloudLinked() || !DB || !DB.readingBooks || !DB.readingBooks.scans) return;
+  RBK_UPLOADING = true;
+  try {
+    let changed = false;
+    for (const id of Object.keys(DB.readingBooks.scans)){
+      const sc = DB.readingBooks.scans[id]; if (!sc) continue;
+      const pages = nArr(sc.pages);
+      for (let i = 0; i < pages.length; i++){
+        const e = pages[i];
+        if (!e || e.u || !e.k) continue;
+        const data = await rbkGet(e.k); if (!data) continue;
+        const url = await uploadPhotoToStorage('books', id + '_' + (sc.stamp||'x') + '_p' + String(i+1).padStart(4,'0'), data);
+        if (url){ e.u = url; changed = true; }
+      }
+      if (changed) sc.pages = pages;
+    }
+    if (changed) saveDB();
+  } catch(e){}
+  RBK_UPLOADING = false;
+}
+(function(){
+  if (window._agmRbkUpHooked) return; window._agmRbkUpHooked = true;
+  const _uap = uploadAllPendingPhotos;
+  uploadAllPendingPhotos = function(){
+    const r = _uap.apply(this, arguments);
+    try { setTimeout(rbkUploadPending, 2500); } catch(e){}
+    return r;
+  };
+})();
+/** Toutes les pages importées, numérotées (pour repérer les pages de chaque leçon). */
+function rbkBrowse(id){
+  const pages = rbkPagesOf(id);
+  if (!pages.length){ toast("Ce livre n'a pas encore été importé."); return; }
+  const nums = pages.map((_,i)=>i+1);
+  rbkShowPages(id, 'Pages du livre — ' + rbBook(id).short, [{ head: pages.length + ' pages importées — repérez ici les numéros de pages de chaque leçon', ar: rbBook(id).ar, nums }], {}, { browse:true });
+}
+/** Aperçu des pages saisies pour une leçon dans l'éditeur. */
+function rbkPreviewLesson(i){
+  if (!RB_EDIT) return;
+  rbCollectEditor();
+  const L = RB_EDIT.lessons[i]; if (!L) return;
+  if (!rbkScan(RB_EDIT.id)){ toast("Importez d'abord le livre (📥) pour voir ses pages."); return; }
+  const n = Math.max(1, Math.round(Number(L.n)||1));
+  const groups = [];
+  for (let p = 0; p < n; p++){
+    const nums = rbkPartPages(L.pg, p, n);
+    if (nums.length) groups.push({ head: 'Leçon ' + (i+1) + ' — ' + (L.t||'') + (n > 1 ? ' (' + (p+1) + '/' + n + ')' : ''), ar: L.ar || '', nums });
+  }
+  if (!groups.length){ toast('Indiquez les pages de cette leçon (ex. 12-15).'); return; }
+  rbkShowPages(RB_EDIT.id, 'Aperçu — leçon ' + (i+1), groups, {});
+}
+function rbkPartsHint(L){
+  const n = Math.max(1, Math.round(Number(L.n)||1));
+  if (!rbkParse(L.pg).length) return '';
+  const parts = [];
+  for (let p = 0; p < n; p++) parts.push((n > 1 ? 'Partie ' + (p+1) + ' : ' : '') + rbkPagesTxt(rbkPartPages(L.pg, p, n)));
+  return parts.join(' · ');
+}
+function rbkCardsHtml(){
+  const adm = isAdminOrAbove();
+  return RB_BOOKS.filter(b=>b.lessons).map(b=>{
+    const sc = rbkScan(b.id);
+    const ls = rbLessons(b.id);
+    const linked = ls.filter(L=>rbkParse(L.pg).length).length;
+    const pend = sc ? nArr(sc.pages).filter(p=>!p.u).length : 0;
+    return `<div style="border:1px solid var(--line);border-left:4px solid ${sc?'#16a34a':'#f59e0b'};border-radius:12px;padding:10px 12px;margin-bottom:8px;background:var(--panel)">
+      <b>${esc(b.name)}</b> <span style="font-family:'Amiri',serif;font-size:15px">${esc(b.ar)}</span>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:3px">${sc
+        ? `✅ ${nArr(sc.pages).length} pages importées · ${linked}/${ls.length} leçons reliées à leurs pages${pend?` · ⏳ ${pend} page(s) en attente d'envoi au cloud`:''}`
+        : '⚠️ Livre non importé : les leçons ouvrent une planche préparée par l’application.'}</div>
+      ${adm?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+        <button class="fb ${sc?'fb-ghost':'fb-gold'} fb-sm" style="flex:1;min-width:120px" onclick="rbkOpenImport('${b.id}')">📥 ${sc?'Réimporter':'Importer le livre'}</button>
+        ${sc?`<button class="fb fb-ghost fb-sm" style="flex:1;min-width:120px" onclick="rbkBrowse('${b.id}')">👁️ Voir les pages</button>`:''}
+        <button class="fb fb-ghost fb-sm" style="flex:1;min-width:120px" onclick="rbOpenEditor('${b.id}')">✏️ Pages des leçons</button>
+      </div>`:''}
+    </div>`;
+  }).join('');
 }
 
 /* ---- Fenêtre du fondateur : choix du livre ---- */
@@ -10884,7 +11615,12 @@ function rbOpenConfig(){
       <button class="fb fb-gold" style="flex:1" onclick="rbSaveConfig()">💾 Enregistrer</button>
       <button class="fb fb-ghost" onclick="rbOpenEditor((document.querySelector('input[name=rbBook]:checked')||{}).value)">✏️ Leçons du livre</button>
       <button class="fb fb-ghost" onclick="closeModal()">Fermer</button>
+    </div>
+    <div style="border-top:1px solid var(--line);margin:14px 0 8px;padding-top:12px"><b>📄 Vrais livres — pages réelles</b>
+      <div style="font-size:11.5px;color:var(--muted);margin:4px 0 10px">Pour que les <b>vraies pages</b> du livre s'ouvrent à chaque leçon (nouvelle leçon, ancienne leçon, restitution) : 1) importez votre exemplaire du livre (PDF ou photos des pages), 2) indiquez dans ✏️ Pages des leçons les pages de chaque leçon.</div>
+      ${rbkCardsHtml()}
     </div>`);
+  try { setTimeout(rbkUploadPending, 500); } catch(e){}
 }
 function rbSaveConfig(){
   if (!isAdminOrAbove()) return;
@@ -10911,15 +11647,20 @@ function rbCollectEditor(){
     if (g('ar')) L.ar = g('ar').value.trim();
     if (g('k')) L.k = g('k').value;
     if (g('n')) L.n = Math.max(1, Math.min(30, Math.round(Number(g('n').value)||1)));
+    if (g('pg')){ const v = g('pg').value.trim(); if (v) L.pg = v; else delete L.pg; }
   });
 }
 function rbRenderEditor(){
   const E = RB_EDIT; if (!E) return;
   const b = rbBook(E.id);
   const kOpts = sel => Object.keys(RB_KIND_LABEL).map(k=>`<option value="${k}" ${k===sel?'selected':''}>${esc(RB_KIND_LABEL[k])}</option>`).join('');
+  const hasScan = !!rbkScan(E.id);
   openModal(`
     <h3 style="margin:0 0 4px">✏️ Leçons — ${esc(b.name)}</h3>
-    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">Adaptez les titres, l'ordre et le nombre de parties de chaque leçon à l'édition utilisée au markaz. Le « contenu » choisit la planche imprimable proposée à l'élève.</p>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">Adaptez les titres, l'ordre et le nombre de parties de chaque leçon à l'édition utilisée au markaz. Indiquez les <b>pages du livre</b> de chaque leçon : ce sont ces vraies pages qui s'ouvrent pour l'élève. Le « contenu » ne sert que de planche de secours tant que les pages ne sont pas indiquées.</p>
+    <div style="border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-bottom:10px;font-size:12px">${hasScan
+      ? `📄 Livre importé : <b>${rbkPagesOf(E.id).length} pages</b> <button class="fb fb-ghost fb-sm" style="margin-left:6px" onclick="rbkBrowse('${E.id}')">👁️ Voir les pages</button>`
+      : `⚠️ Le vrai livre n'est pas encore importé. <button class="fb fb-gold fb-sm" style="margin-left:6px" onclick="rbkOpenImport('${E.id}')">📥 Importer le livre</button>`}</div>
     ${E.lessons.map((L,i)=>`<div style="border:1px solid var(--line);border-radius:11px;padding:10px 11px;margin-bottom:8px;background:var(--panel)">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px"><b>Leçon ${i+1}</b>
         <span style="display:flex;gap:4px">
@@ -10931,7 +11672,11 @@ function rbRenderEditor(){
         <div class="fg"><input class="fi" id="rbE_ar_${i}" dir="rtl" value="${esc(L.ar||'')}" placeholder="Titre en arabe (facultatif)"></div>
         <div class="fg"><label class="fl">Parties</label><input class="fi" type="number" min="1" max="30" id="rbE_n_${i}" value="${Number(L.n)||1}"></div>
       </div>
-      <div class="fg" style="margin-bottom:0"><label class="fl">Contenu de la planche</label><select class="fi" id="rbE_k_${i}">${kOpts(L.k||'letters')}</select></div>
+      <div class="fg"><label class="fl">📄 Pages du livre (ex. 12-15, ou partie par partie : 12-13, 14, 15)</label>
+        <div style="display:flex;gap:6px"><input class="fi" id="rbE_pg_${i}" inputmode="numeric" value="${esc(L.pg||'')}" placeholder="${hasScan?'N° des pages dans le livre importé':'Importez d’abord le livre'}" style="flex:1" onchange="rbkEdHint(${i})">
+          <button class="fb fb-ghost fb-sm" type="button" onclick="rbkPreviewLesson(${i})" title="Voir ces pages">👁️</button></div>
+        <div id="rbE_pgh_${i}" style="font-size:11px;color:var(--muted);margin-top:3px">${esc(rbkPartsHint(L))}</div></div>
+      <div class="fg" style="margin-bottom:0"><label class="fl">Contenu de la planche (si les pages ne sont pas indiquées)</label><select class="fi" id="rbE_k_${i}">${kOpts(L.k||'letters')}</select></div>
     </div>`).join('')}
     <button class="fb fb-ghost" style="width:100%;margin-bottom:10px" onclick="rbEdAdd()">+ Ajouter une leçon</button>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -10939,6 +11684,11 @@ function rbRenderEditor(){
       <button class="fb fb-ghost" onclick="rbEdReset()">↺ Programme d'origine</button>
       <button class="fb fb-ghost" onclick="rbOpenConfig()">← Retour</button>
     </div>`);
+}
+function rbkEdHint(i){
+  if (!RB_EDIT) return; rbCollectEditor();
+  const L = RB_EDIT.lessons[i]; const el = document.getElementById('rbE_pgh_'+i);
+  if (el && L) el.textContent = rbkParse(L.pg).length ? rbkPartsHint(L) : (L.pg ? '⚠️ Format non reconnu (ex. 12-15 ou 12-13, 14)' : '');
 }
 function rbEdMove(i, d){ rbCollectEditor(); const a = RB_EDIT.lessons; const j = i+d; if (j<0||j>=a.length) return; const t = a[i]; a[i] = a[j]; a[j] = t; rbRenderEditor(); }
 function rbEdDel(i){ rbCollectEditor(); if (RB_EDIT.lessons.length <= 1){ toast('Le livre doit garder au moins une leçon.'); return; } RB_EDIT.lessons.splice(i,1); rbRenderEditor(); }
@@ -10959,7 +11709,7 @@ function rbEdSave(){
 }
 function rbEdReset(){
   if (!isAdminOrAbove() || !RB_EDIT) return;
-  if (!confirm("Revenir au programme d'origine de ce livre ?")) return;
+  if (!confirm("Revenir au programme d'origine de ce livre ?\n(Les titres, parties et pages indiqués pour ce livre seront effacés ; les pages importées sont conservées.)")) return;
   if (DB.readingBooks && DB.readingBooks.lessons){ const l = Object.assign({}, DB.readingBooks.lessons); delete l[RB_EDIT.id]; DB.readingBooks.lessons = l; saveDB(); }
   RB_EDIT = { id: RB_EDIT.id, lessons: nClone(rbBook(RB_EDIT.id).lessons) };
   rbRenderEditor();
