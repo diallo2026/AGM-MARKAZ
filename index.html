@@ -1548,7 +1548,7 @@ function pageHead(title, sub, actionsHtml){
    après un déploiement, c'est que l'ancienne version est encore en
    cache sur l'appareil.
    ===================================================================== */
-const AGM_VERSION = '2026.10.13-1';
+const AGM_VERSION = '2026.10.14-1';
 
 /** Supprime tout le cache local de l'appli et recharge la dernière version. */
 async function forcerMiseAJour(){
@@ -3397,6 +3397,121 @@ function studentTotalDepense(id){
 }
 function studentFundBalance(id){ return studentTotalDepose(id)-studentTotalDepense(id); }
 
+/* ---------------------------------------------------------------------
+   NB « scolarité d'abord » · prélèvement de la scolarité sur le dépôt ·
+   achats à crédit (dette du tuteur).
+   Aucune nouvelle collection : la scolarité prélevée est un paiement de
+   scolarité normal (Paiements, reçu) + une ligne « Frais de scolarité »
+   dans les achats de l'élève (clés facultatives kind / payment_id).
+   Un achat à crédit laisse le solde du tuteur négatif : c'est sa dette
+   d'achats, reportée automatiquement dans le suivi des dettes. Chaque
+   nouveau dépôt la rembourse d'abord.
+   ------------------------------------------------------------------- */
+/** Le NB s'applique-t-il à cet élève (interne payant, NB activé sur les cartes) ? */
+function achNbRule(s){ try { return !!(s && paymentStatusOf(s)==='payant' && carteNbFor(s)); } catch(e){ return false; } }
+/** Scolarité due à ce jour : mois non réglés et montant. */
+function achTuitionDue(s){
+  if (!s || paymentStatusOf(s)!=='payant') return { total:0, months:[] };
+  let led = []; try { led = studentDebtLedger(s.id); } catch(e){}
+  const months = led.filter(m=>m.balance>0).map(m=>({ ym:m.ym, label:m.label, balance:Math.round(m.balance) }));
+  return { total: months.reduce((a,m)=>a+m.balance,0), months };
+}
+/** Dette d'achats du tuteur : les dépôts couvrent les achats dans l'ordre chronologique ; les achats non couverts restent dus. */
+function achDebtInfo(studentId){
+  const id = (studentId && typeof studentId === 'object') ? studentId.id : studentId;
+  let pool = studentTotalDepose(id);
+  const lines = [];
+  DB.purchases.map((x,i)=>({ x, i })).filter(o=>o.x.student_id===id && o.x.type==='achat')
+    .sort((a,b)=>String(a.x.date||'').localeCompare(String(b.x.date||'')) || a.i-b.i)
+    .forEach(o=>{
+      const qty = Number(o.x.quantity)||1, pu = Number(o.x.amount)||0, tot = qty*pu;
+      const cov = Math.max(0, Math.min(pool, tot)); pool -= cov;
+      const due = tot - cov;
+      if (due > 0.5) lines.push({ id:o.x.id, item:String(o.x.item||'Article'), date:o.x.date||'', qty, pu, total:tot, due });
+    });
+  return { total: lines.reduce((a,l)=>a+l.due,0), lines };
+}
+/** Dettes d'un élève : scolarité + achats à crédit, puis total global. */
+function achGlobalDebt(s){
+  const sc = achTuitionDue(s), ac = achDebtInfo(s.id);
+  return { scol: sc.total, months: sc.months, ach: ac.total, achLines: ac.lines, total: sc.total + ac.total };
+}
+/** Prélève la scolarité due sur le dépôt du tuteur : paiement de scolarité (avec reçu) + ligne dans les achats. */
+function achImputeTuition(sid, amount, date){
+  const s = DB.students.find(x=>x.id===sid); if (!s) return null;
+  const due = achTuitionDue(s);
+  const amt = Math.round(Math.min(Number(amount)||0, due.total, Math.max(0, studentFundBalance(sid))));
+  if (!(amt > 0)) return null;
+  let r = amt; const months = [];
+  for (const m of due.months){ if (r <= 0) break; months.push(m.ym); r -= Math.min(r, m.balance); }
+  const p = recordPayment({ student_id: sid, amount: amt, label: 'Frais de scolarité', date: date || todayStr(), for_months: months });
+  if (!p) return null;
+  p.source = 'depot_tuteur';
+  DB.purchases.push({ id: uid('ac'), student_id: sid, type: 'achat', kind: 'scolarite', payment_id: p.id,
+    item: 'Frais de scolarité — ' + months.map(monthYearLabel).join(', ') + ' (prélevés sur le dépôt)',
+    quantity: 1, amount: amt, date: p.date, by: (currentUser()||{}).id || null });
+  saveDB();
+  logAction('Scolarité prélevée sur le dépôt', (s.first_name||'')+' '+(s.last_name||'')+' ('+(s.matricule||'')+') — '+fmtGNF(amt)+' : '+months.map(monthYearLabel).join(', ')+' — reçu '+(p.receipt_no||''));
+  return p;
+}
+/** Annule un prélèvement de scolarité : le paiement lié est supprimé et le montant revient sur le dépôt. */
+function achCancelImputation(lineId, after){
+  const a = DB.purchases.find(x=>x.id===lineId); if (!a) return;
+  const p = a.payment_id ? DB.payments.find(x=>x.id===a.payment_id) : null;
+  if (p && !canEditRecords()){ toast('Ligne liée au paiement de scolarité ' + (p.receipt_no||'') + " : seul le fondateur peut l'annuler (Paiements)."); return; }
+  if (!confirm('Annuler ce prélèvement de scolarité ?\n' + (p ? 'Le paiement ' + (p.receipt_no||'') + ' (' + fmtGNF(p.amount) + ') sera supprimé et le' : 'Le') + ' montant reviendra sur le dépôt du tuteur.')) return;
+  const s = DB.students.find(x=>x.id===a.student_id);
+  if (p){ DB.transactions = DB.transactions.filter(t=>t.payment_id!==p.id); DB.payments = DB.payments.filter(x=>x.id!==p.id); }
+  DB.purchases = DB.purchases.filter(x=>x.id!==lineId);
+  saveDB();
+  logAction('Prélèvement de scolarité annulé', (s?(s.first_name+' '+s.last_name):'—') + ' — ' + fmtGNF((Number(a.amount)||0)*(Number(a.quantity)||1)) + (p ? ' — reçu ' + (p.receipt_no||'') + ' supprimé' : ''));
+  toast('Prélèvement annulé : le montant est revenu sur le dépôt.');
+  if (after) after();
+}
+/** Bloc d'alerte NB (formulaire d'achat et fiche de l'élève). */
+function achNbAlertHtml(s, o){
+  o = o || {};
+  const due = o.due || achTuitionDue(s);
+  if (!achNbRule(s) || due.total <= 0) return '';
+  const bal = studentFundBalance(s.id);
+  const impMax = Math.min(due.total, Math.max(0, bal));
+  return `<div style="border:1.5px solid #dc2626;background:rgba(220,38,38,.08);border-radius:12px;padding:11px 13px;margin-bottom:12px;font-size:12.5px">
+    <b style="color:#fca5a5">⚠️ Scolarité non à jour : ${fmtGNF(due.total)}</b>
+    <div style="margin:6px 0">${due.months.map(m=>`<div style="display:flex;justify-content:space-between;gap:8px"><span>${esc(m.label)}</span><b>${fmtGNF(m.balance)}</b></div>`).join('')}</div>
+    <div style="font-weight:800;margin:6px 0">NB : ${esc(carteNbFor(s))}</div>
+    ${o.form ? (impMax > 0
+      ? `<label style="display:flex;gap:9px;align-items:flex-start;font-weight:700;margin-top:8px;cursor:pointer">
+           <input type="checkbox" style="width:20px;height:20px;flex-shrink:0;margin-top:1px" ${o.checked?'checked':''} onchange="AC_AUTH.imp=this.checked;calcAchatTotal()">
+           <span>J'autorise le prélèvement de <b>${fmtGNF(impMax)}</b> de scolarité sur le dépôt du tuteur (disponible : ${fmtGNF(Math.max(0,bal))}).${impMax < due.total ? ' Il restera ' + fmtGNF(due.total - impMax) + ' de scolarité à payer.' : ''}</span></label>
+         <div style="font-size:11.5px;color:var(--muted);margin-top:4px">Les achats se font ensuite avec le reste du dépôt.</div>`
+      : `<div style="font-size:12px;margin-top:6px">Aucun dépôt disponible pour régler la scolarité : l'achat ne peut se faire qu'<b>à crédit</b>, avec votre autorisation (dette du tuteur).</div>`)
+    : (o.button && impMax > 0 ? `<button class="fb fb-gold fb-sm" style="width:100%;margin-top:8px" onclick="achImputeFromFiche('${s.id}')">💳 Prélever ${fmtGNF(impMax)} de scolarité sur le dépôt</button>` : '')}
+  </div>`;
+}
+function achImputeFromFiche(sid){
+  const s = DB.students.find(x=>x.id===sid); if (!s) return;
+  const due = achTuitionDue(s);
+  const amt = Math.min(due.total, Math.max(0, studentFundBalance(sid)));
+  if (amt <= 0){ toast('Aucun dépôt disponible ou scolarité déjà à jour.'); return; }
+  if (!confirm('Autorisez-vous le prélèvement de ' + fmtGNF(amt) + ' sur le dépôt du tuteur pour régler la scolarité de ' + s.first_name + ' ' + s.last_name + ' ?')) return;
+  const p = achImputeTuition(sid, amt, todayStr());
+  if (!p){ toast('Prélèvement impossible.'); return; }
+  toast('✅ Scolarité réglée sur le dépôt : ' + fmtGNF(p.amount) + ' — reçu ' + (p.receipt_no||'') + (p.status==='pending' ? ' (en attente d’approbation)' : '') + '.');
+  viewStudentAchats(sid);
+  if (currentPage === 'achats') renderAchats();
+}
+/** Bloc « achats à crédit » (fiche de l'élève). */
+function achDebtBoxHtml(s){
+  const ac = achDebtInfo(s.id); if (ac.total <= 0) return '';
+  const sc = achTuitionDue(s);
+  return `<div style="border:1.5px solid #f59e0b;background:rgba(245,158,11,.08);border-radius:12px;padding:11px 13px;margin-bottom:12px;font-size:12.5px">
+    <b>🛒 Achats à crédit — dette du tuteur : ${fmtGNF(ac.total)}</b>
+    <div style="margin:6px 0">${ac.lines.map(l=>`<div style="display:flex;justify-content:space-between;gap:8px"><span>${esc(l.item)}${l.date?' <span style="color:var(--muted)">('+esc(l.date)+')</span>':''}</span><b>${fmtGNF(l.due)}</b></div>`).join('')}</div>
+    ${sc.total>0?`<div style="border-top:1px solid var(--line);padding-top:6px;margin-top:6px">Scolarité due : <b>${fmtGNF(sc.total)}</b> · Total global des dettes : <b style="color:#fca5a5">${fmtGNF(sc.total+ac.total)}</b></div>`:''}
+    <div style="font-size:11.5px;color:var(--muted);margin-top:4px">Cette dette figure dans le suivi des dettes. Le prochain dépôt du tuteur la rembourse d'abord.</div>
+  </div>`;
+}
+
 /* ================================================================
    PAGE PRINCIPALE
    ================================================================ */
@@ -3406,7 +3521,8 @@ function renderAchats(){
   const externat  = actifs.filter(s=>s.category==='externat');
   const totalRecu    = DB.purchases.filter(x=>x.type==='depot').reduce((a,x)=>a+Number(x.amount),0);
   const totalDepense = DB.purchases.filter(x=>x.type==='achat').reduce((a,x)=>a+Number(x.amount||0)*Number(x.quantity||1),0);
-  const totalReste   = totalRecu-totalDepense;
+  const totalReste   = actifs.reduce((a,s)=>a+Math.max(0, studentFundBalance(s.id)),0);   // dépôts encore disponibles
+  const totalDetteAch = actifs.reduce((a,s)=>a+Math.max(0, -studentFundBalance(s.id)),0); // achats à crédit non couverts
 
   const makeRows = (list) => list.map(s=>{
     const rec = studentTotalDepose(s.id);
@@ -3424,7 +3540,7 @@ function renderAchats(){
       <td style="text-align:right;color:#86efac;font-weight:700">${has?fmtGNF(rec):'<span style="color:var(--muted)">—</span>'}</td>
       <td style="text-align:right;color:#fca5a5;font-weight:700">${dep>0?fmtGNF(dep):'<span style="color:var(--muted)">—</span>'}</td>
       <td style="text-align:right;font-weight:800;color:${rst<0?'#fca5a5':rst>0?'#f0c975':'var(--muted)'}">
-        ${has?fmtGNF(rst):'<span style="color:var(--muted)">—</span>'}
+        ${has?fmtGNF(rst):'<span style="color:var(--muted)">—</span>'}${rst<0?'<div style="font-size:10px;font-weight:700">dette du tuteur</div>':''}
       </td>
       <td style="text-align:right;white-space:nowrap">
         <button class="fb fb-green fb-sm" onclick="event.stopPropagation();openDepotForm('${s.id}')">+ Dépôt</button>
@@ -3469,6 +3585,7 @@ function renderAchats(){
       <div class="kpi green"><div class="kl">Total reçu (tuteurs)</div><div class="kv">${fmtGNF(totalRecu)}</div></div>
       <div class="kpi red">  <div class="kl">Total dépensé</div>      <div class="kv">${fmtGNF(totalDepense)}</div></div>
       <div class="kpi gold"> <div class="kl">Reste en dépôt</div>     <div class="kv">${fmtGNF(totalReste)}</div></div>
+      ${totalDetteAch>0?`<div class="kpi red"><div class="kl">Achats à crédit (dettes)</div><div class="kv">${fmtGNF(totalDetteAch)}</div></div>`:''}
       <div class="kpi">      <div class="kl">Élèves concernés</div>   <div class="kv">${actifs.filter(s=>DB.purchases.some(p=>p.student_id===s.id)).length}</div></div>
     </div>
 
@@ -3555,8 +3672,8 @@ function renderStudentCard(studentId, containerId, extra){
           <div style="font-size:13px;font-weight:800;color:#fca5a5;margin-top:3px">${fmtGNF(dep)}</div>
         </div>
         <div style="background:rgba(212,160,60,.1);border:1px solid rgba(212,160,60,.3);border-radius:8px;padding:8px;text-align:center">
-          <div style="font-size:9.5px;color:var(--muted);font-weight:700;text-transform:uppercase">Solde</div>
-          <div style="font-size:13px;font-weight:800;color:${rst<0?'#fca5a5':'#f0c975'};margin-top:3px">${fmtGNF(rst)}</div>
+          <div style="font-size:9.5px;color:var(--muted);font-weight:700;text-transform:uppercase">${rst<0?'Dette':'Solde'}</div>
+          <div style="font-size:13px;font-weight:800;color:${rst<0?'#fca5a5':'#f0c975'};margin-top:3px">${fmtGNF(rst<0?-rst:rst)}</div>
         </div>
       </div>
     </div>`;
@@ -3629,6 +3746,8 @@ function viewStudentAchats(studentId){
       </div>
     </div>
 
+    ${achNbAlertHtml(s, { button:true })}
+    ${achDebtBoxHtml(s)}
     <!-- Boutons d'action -->
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px">
       <button class="fb fb-green fb-sm" onclick="closeModal();openDepotForm('${studentId}')">+ Dépôt tuteur</button>
@@ -3650,7 +3769,7 @@ function viewStudentAchats(studentId){
       <div style="background:rgba(212,160,60,.08);border:1px solid rgba(212,160,60,.3);border-radius:10px;padding:11px;text-align:center">
         <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700">Reste</div>
         <div style="font-size:16px;font-weight:800;color:${reste<0?'#fca5a5':'#f0c975'};margin-top:4px">${fmtGNF(reste)}</div>
-        <div style="font-size:9px;color:var(--muted);margin-top:2px">${reste<0?'⚠️ Dépassement':'disponible'}</div>
+        <div style="font-size:9px;color:var(--muted);margin-top:2px">${reste<0?'⚠️ Dette du tuteur':'disponible'}</div>
       </div>
     </div>
 
@@ -3749,9 +3868,11 @@ function openAchatForm(studentId){
   const actifs = DB.students.filter(s=>s.status!=='non_actif');
   if (!actifs.length){ toast('Inscrivez un élève avant de saisir un achat.'); return; }
   _acLineCount = 0;
+  AC_AUTH = { imp:false, credit:false };
   openModal(`
     <h3>🛒 Bon d'achat</h3>
     ${studentSelectorHtml(studentId, 'ac')}
+    <div id="ac_nb"></div>
 
     <!-- Tableau des articles -->
     <div style="font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:8px">Articles</div>
@@ -3782,11 +3903,16 @@ function openAchatForm(studentId){
         <span style="font-size:12px;font-weight:700">Montant reçu (tuteur)</span>
         <span id="acRecu" style="font-weight:800;font-family:'DM Mono',monospace;color:#86efac">—</span>
       </div>
+      <div id="acImpRow" style="display:none;justify-content:space-between;padding:8px 13px;border-bottom:1px solid var(--line);background:rgba(220,38,38,.06)">
+        <span style="font-size:12px;font-weight:700">Scolarité prélevée sur le dépôt</span>
+        <span id="acImp" style="font-weight:800;font-family:'DM Mono',monospace;color:#fca5a5">0 GNF</span>
+      </div>
       <div style="display:flex;justify-content:space-between;padding:9px 13px;background:rgba(212,160,60,.1)">
-        <span style="font-size:13px;font-weight:800">Reste après cet achat</span>
+        <span id="acResteLbl" style="font-size:13px;font-weight:800">Reste après cet achat</span>
         <span id="acReste" style="font-size:14px;font-weight:800;font-family:'DM Mono',monospace;color:#f0c975">—</span>
       </div>
     </div>
+    <div id="acAuth"></div>
 
     <div class="fg"><label class="fl">Date</label>
       <input class="fi" type="date" id="acDate" value="${todayStr()}">
@@ -3800,8 +3926,10 @@ function openAchatForm(studentId){
   if (studentId) ac_onStudentChange(studentId);
 }
 
+let AC_AUTH = { imp:false, credit:false };
 function ac_onStudentChange(forceId){
   const sid = forceId || (document.getElementById('ac_student')||{}).value;
+  AC_AUTH = { imp:false, credit:false };
   renderStudentCard(sid, 'ac_card', '');
   calcAchatTotal();
 }
@@ -3846,18 +3974,41 @@ function calcAchatTotal(){
   });
   const totalEl = document.getElementById('acTotal');
   if (totalEl) totalEl.textContent = fmtGNF(total);
-  // Mise à jour reste
+  // Mise à jour reste (prélèvement de la scolarité et achat à crédit compris)
   const sel = document.getElementById('ac_student');
   if (sel && sel.value){
-    const bal   = studentFundBalance(sel.value);
+    const st    = achFormState(sel.value, total);
     const recu  = studentTotalDepose(sel.value);
-    const reste = bal-total;
     const recuEl  = document.getElementById('acRecu');
     const resteEl = document.getElementById('acReste');
+    const lblEl   = document.getElementById('acResteLbl');
     if (recuEl)  recuEl.textContent  = fmtGNF(recu);
-    if (resteEl){ resteEl.textContent = fmtGNF(reste); resteEl.style.color = reste<0?'#fca5a5':'#f0c975'; }
+    if (resteEl){ resteEl.textContent = fmtGNF(st.reste<0 ? -st.reste : st.reste); resteEl.style.color = st.reste<0?'#fca5a5':'#f0c975'; }
+    if (lblEl) lblEl.textContent = st.reste<0 ? 'Dette du tuteur après cet achat' : 'Reste après cet achat';
+    const impRow = document.getElementById('acImpRow');
+    if (impRow){ impRow.style.display = st.imp>0 ? 'flex' : 'none'; const v = document.getElementById('acImp'); if (v) v.textContent = fmtGNF(st.imp); }
+    const nb = document.getElementById('ac_nb');
+    if (nb) nb.innerHTML = achNbAlertHtml(st.s, { form:true, checked:AC_AUTH.imp, due:st.due });
+    const au = document.getElementById('acAuth');
+    if (au) au.innerHTML = st.credit > 0 ? `<label style="display:flex;gap:9px;align-items:flex-start;border:1.5px solid #f59e0b;background:rgba(245,158,11,.08);border-radius:11px;padding:10px 12px;margin-bottom:12px;font-size:12.5px;cursor:pointer">
+        <input type="checkbox" style="width:20px;height:20px;flex-shrink:0;margin-top:1px" ${AC_AUTH.credit?'checked':''} onchange="AC_AUTH.credit=this.checked">
+        <span><b>Achat à crédit :</b> le dépôt disponible (${fmtGNF(st.avail)}) ne couvre pas cet achat. J'autorise l'enregistrement de <b>${fmtGNF(st.credit)}</b> comme <b>dette du tuteur</b> (ajoutée à ses dettes, remboursée par son prochain dépôt).</span></label>` : '';
+  } else {
+    const nb = document.getElementById('ac_nb'); if (nb) nb.innerHTML = '';
+    const au = document.getElementById('acAuth'); if (au) au.innerHTML = '';
   }
   return total;
+}
+/** État du bon d'achat : scolarité due (NB), prélèvement autorisé, reste disponible, partie à crédit. */
+function achFormState(sid, total){
+  const s = DB.students.find(x=>x.id===sid) || { id:sid };
+  const bal = studentFundBalance(sid);
+  const due = achNbRule(s) ? achTuitionDue(s) : { total:0, months:[] };
+  const impMax = Math.min(due.total, Math.max(0, bal));
+  const imp = (AC_AUTH.imp && impMax > 0) ? impMax : 0;
+  const avail = Math.max(0, bal - imp);
+  const credit = Math.max(0, (Number(total)||0) - avail);
+  return { s, bal, due, impMax, imp, avail, credit, reste: bal - imp - (Number(total)||0) };
 }
 
 function saveAchat(){
@@ -3874,17 +4025,34 @@ function saveAchat(){
   });
   if (!lines.length){ toast('Ajoutez au moins un article avec un prix.'); return; }
   const totalAchat = lines.reduce((a,l)=>a+l.qty*l.pu,0);
-  const bal = studentFundBalance(sid);
-  if (totalAchat>bal){
-    toast('Solde insuffisant : '+fmtGNF(bal)+' disponible, besoin de '+fmtGNF(totalAchat)+'.');
+  const st = achFormState(sid, totalAchat);
+  const who = ((st.s.first_name||'')+' '+(st.s.last_name||'')).trim();
+  // 1) NB : la scolarité d'abord — prélèvement sur le dépôt, avec autorisation.
+  if (st.due.total > 0 && st.impMax > 0 && !st.imp){
+    if (!isAdminOrAbove()){ toast("NB : la scolarité doit être réglée avant tout autre achat. Cochez l'autorisation de prélever la scolarité sur le dépôt du tuteur."); return; }
+    if (!confirm("La scolarité de " + who + " n'est pas à jour (" + fmtGNF(st.due.total) + ").\nEnregistrer cet achat SANS prélever la scolarité sur le dépôt (exception autorisée par le fondateur / l'administrateur) ?")) return;
+    logAction('Achat malgré la scolarité non à jour', who + ' — scolarité due ' + fmtGNF(st.due.total) + ' — exception autorisée');
+  }
+  // 2) Dépôt insuffisant : achat à crédit (dette du tuteur), avec autorisation.
+  if (st.credit > 0 && !AC_AUTH.credit){
+    toast('Dépôt insuffisant : ' + fmtGNF(st.avail) + ' disponible pour ' + fmtGNF(totalAchat) + '. Cochez « Achat à crédit » pour enregistrer ' + fmtGNF(st.credit) + ' comme dette du tuteur, ou réduisez les achats.');
     return;
+  }
+  let pay = null;
+  if (st.imp > 0){
+    pay = achImputeTuition(sid, st.imp, date);
+    if (!pay){ toast('Le prélèvement de la scolarité a échoué : achat non enregistré.'); return; }
   }
   lines.forEach(l=>{
     DB.purchases.push({ id:uid('ac'), student_id:sid, type:'achat',
       item:l.item, quantity:l.qty, amount:l.pu, date, by:currentUser().id });
   });
   saveDB(); closeModal();
-  toast('Bon d\'achat validé : '+fmtGNF(totalAchat)+' — reste '+fmtGNF(bal-totalAchat));
+  if (st.credit > 0) logAction('Achat à crédit', who + ' — achat de ' + fmtGNF(totalAchat) + ' dont ' + fmtGNF(st.credit) + ' en dette du tuteur');
+  const bal2 = studentFundBalance(sid);
+  toast('Bon d\'achat validé : ' + fmtGNF(totalAchat)
+    + (pay ? ' — scolarité prélevée : ' + fmtGNF(pay.amount) + ' (reçu ' + (pay.receipt_no||'') + ')' : '')
+    + (bal2 < 0 ? ' — dette du tuteur : ' + fmtGNF(-bal2) : ' — reste ' + fmtGNF(bal2)), 5000);
   renderAchats();
 }
 
@@ -4040,7 +4208,7 @@ function saveEditDepot(id, studentId){
   // Le nouveau montant ne doit pas rendre le solde du tuteur négatif
   // (dépôts − ancien montant + nouveau montant doit couvrir les achats).
   const nouveauTotal = studentTotalDepose(studentId) - Number(d.amount||0) + amount;
-  if (nouveauTotal < studentTotalDepense(studentId)){
+  if (amount < Number(d.amount||0) && nouveauTotal < studentTotalDepense(studentId)){
     toast('Impossible : ce montant mettrait le solde en négatif (achats déjà supérieurs).'); return;
   }
   d.amount = amount;
@@ -4121,10 +4289,7 @@ function saveEditAchat(id, studentId){
   const ancien = (Number(a.amount)||0)*(Number(a.quantity)||1);
   const dispo  = studentFundBalance(studentId) + ancien;
   const nouveau = qty*pu;
-  if (nouveau > dispo){
-    toast('Solde insuffisant : '+fmtGNF(dispo)+' disponible pour cette ligne, besoin de '+fmtGNF(nouveau)+'.');
-    return;
-  }
+  if (nouveau > dispo && !confirm('Dépôt insuffisant : ' + fmtGNF(Math.max(0, dispo)) + ' disponible pour cette ligne, besoin de ' + fmtGNF(nouveau) + '.\nEnregistrer le dépassement comme dette du tuteur (achat à crédit) ?')) return;
   a.item = item;
   a.quantity = qty;
   a.amount = pu;
@@ -4235,7 +4400,7 @@ function printBonAchat(studentId){
   <div class="recap-foot">
     <div class="row dep"><span>Total dépensé</span><span class="val" style="color:#b91c1c">${totalDepense.toLocaleString('fr-FR')} GNF</span></div>
     <div class="row rec"><span>Montant reçu (tuteur)</span><span class="val" style="color:#047857">${totalRecu.toLocaleString('fr-FR')} GNF</span></div>
-    <div class="row rst"><span>Reste à disposition</span><span class="val" style="color:${reste<0?'#b91c1c':'#b45309'}">${reste.toLocaleString('fr-FR')} GNF</span></div>
+    <div class="row rst"><span>${reste<0?'Dette du tuteur (achats à crédit)':'Reste à disposition'}</span><span class="val" style="color:${reste<0?'#b91c1c':'#b45309'}">${Math.abs(reste).toLocaleString('fr-FR')} GNF</span></div>
   </div>
   ${depots.length?`
   <div style="margin-top:20px;font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:#15803d;margin-bottom:6px">Dépôts du tuteur</div>
@@ -4246,6 +4411,48 @@ function printBonAchat(studentId){
   </div><scr`+'ipt>window.print();</scr'+'ipt></body></html>';
   w.document.write(html); w.document.close();
 }
+
+/* ---- Ligne « Frais de scolarité » prélevée sur le dépôt : elle suit son paiement ---- */
+function achSyncTuitionLines(){
+  let ch = false;
+  const keep = [];
+  (DB.purchases||[]).forEach(x=>{
+    if (x && x.kind === 'scolarite' && x.payment_id){
+      const p = (DB.payments||[]).find(y=>y.id===x.payment_id);
+      if (!p || p.status === 'rejected'){ ch = true; return; }          // paiement supprimé / rejeté : le montant revient sur le dépôt
+      const amt = Number(p.amount)||0;
+      if (amt !== (Number(x.amount)||0)*(Number(x.quantity)||1)){ x.amount = amt; x.quantity = 1; ch = true; }
+    }
+    keep.push(x);
+  });
+  if (ch){ DB.purchases = keep; saveDB(); }
+  return ch;
+}
+(function(){
+  if (window._agmAchHooked) return; window._agmAchHooked = true;
+  const isTui = id => { const a = (DB.purchases||[]).find(x=>x.id===id); return !!(a && a.kind === 'scolarite'); };
+  const _da = deleteAchat;
+  deleteAchat = function(id, studentId){
+    if (isTui(id)) return achCancelImputation(id, ()=>viewStudentAchats(studentId));
+    return _da.apply(this, arguments);
+  };
+  const _dag = deleteAchatFromGestion;
+  deleteAchatFromGestion = function(id, studentId){
+    if (isTui(id)) return achCancelImputation(id, ()=>openGestionMouvements(studentId));
+    return _dag.apply(this, arguments);
+  };
+  const _oea = openEditAchat;
+  openEditAchat = function(id, studentId){
+    if (isTui(id)){ toast('Cette ligne est la scolarité prélevée sur le dépôt (paiement avec reçu) : pour la corriger, supprimez-la (🗑️) puis refaites l’opération.'); return; }
+    return _oea.apply(this, arguments);
+  };
+  const _dp = deletePayment;
+  deletePayment = function(){ const r = _dp.apply(this, arguments); try { achSyncTuitionLines(); } catch(e){} return r; };
+  const _rp = rejectPayment;
+  rejectPayment = function(){ const r = _rp.apply(this, arguments); try { achSyncTuitionLines(); } catch(e){} return r; };
+  const _sep = saveEditPayment;
+  saveEditPayment = function(){ const r = _sep.apply(this, arguments); try { achSyncTuitionLines(); } catch(e){} return r; };
+})();
 
 function renderDepenses(){
   const list = DB.transactions.filter(t=>t.type==='expense').sort((a,b)=>b.date.localeCompare(a.date)).slice(0,60);
@@ -5139,7 +5346,7 @@ function printAchatsA4(studentId){
     + `<div class="sec">Détail des achats</div>`
     + a4Table(['N°','Date','Désignation','Qté','P.U.','Total'], rows,
         ['','','','','TOTAL', `<span class="b">${fmtGNF(tot)}</span>`])
-    + a4Kpis([{l:'Total déposé',v:fmtGNF(dep)},{l:'Total dépensé',v:fmtGNF(dsp)},{l:'Solde',v:fmtGNF(dep-dsp)}]),
+    + a4Kpis([{l:'Total déposé',v:fmtGNF(dep)},{l:'Total dépensé',v:fmtGNF(dsp)},(dep-dsp)<0?{l:'Dette du tuteur',v:fmtGNF(dsp-dep)}:{l:'Solde',v:fmtGNF(dep-dsp)}]),
     { subtitle:esc(s.first_name+' '+s.last_name)+' — '+periodLabel(),
       shareText:`Bon d'achat — ${s.first_name} ${s.last_name}\nPériode : ${periodLabel()}\nTotal achats : ${fmtGNF(tot)}\nSolde restant : ${fmtGNF(dep-dsp)}`,
       phone:s.guardian_phone, sgLeft:'Le tuteur', sgRight:'Le comptable', image:true });
@@ -9339,27 +9546,44 @@ function waBuildReminderQueue(ref){
     // Fin de mois : du 1er au 19, le mois en cours n'est pas encore exigible (seuls les retards sont relancés).
     const dueNow = payModeCfg().mode === 'debut' || ref.getDate() >= 20;
     const dueT = dueNow ? Math.max(0, fee - paidT) : 0;
-    const hasDebt = sit.arrearsAmount > 0;
+    let ach = { total:0, lines:[] }; try { ach = achDebtInfo(s.id); } catch(e){}
+    const hasDebt = sit.arrearsAmount > 0 || ach.total > 0;
     if (hasDebt && !c.remindDebt && !c.remindUpcoming) return;
     if (!hasDebt && (!c.remindUpcoming || dueT <= 0)) return;
-    const line = { s, arrears: hasDebt && c.remindDebt ? sit.arrears : [], arrearsAmount: hasDebt && c.remindDebt ? sit.arrearsAmount : 0,
-                   target, dueT: c.remindUpcoming ? dueT : 0 };
-    if (!line.arrearsAmount && !line.dueT) return;
+    const line = { s, arrears: sit.arrearsAmount > 0 && c.remindDebt ? sit.arrears : [], arrearsAmount: sit.arrearsAmount > 0 && c.remindDebt ? sit.arrearsAmount : 0,
+                   target, dueT: c.remindUpcoming ? dueT : 0,
+                   achDebt: c.remindDebt ? ach.total : 0, achCount: c.remindDebt ? ach.lines.length : 0 };
+    if (!line.arrearsAmount && !line.dueT && !line.achDebt) return;
     const phone = waNormPhone(s.guardian_phone);
     if (!phone){ noPhone.push(line); return; }
     if (!groups[phone]) groups[phone] = { phone, parent: s.guardian_name || '', lines: [] };
     groups[phone].lines.push(line);
   });
+  // Élèves sans mensualité (graciés…) ayant des achats à crédit : relancés avec les dettes.
+  if (c.remindDebt){
+    const inQ = {}; Object.values(groups).forEach(g=>g.lines.forEach(l=>{ inQ[l.s.id] = true; })); noPhone.forEach(l=>{ inQ[l.s.id] = true; });
+    (DB.students||[]).filter(s=>s.status!=='non_actif' && !inQ[s.id] && !stIsInactive(s)).forEach(s=>{
+      let ach = { total:0, lines:[] }; try { ach = achDebtInfo(s.id); } catch(e){}
+      if (ach.total <= 0) return;
+      const line = { s, arrears: [], arrearsAmount: 0, target, dueT: 0, achDebt: ach.total, achCount: ach.lines.length };
+      const phone = waNormPhone(s.guardian_phone);
+      if (!phone){ noPhone.push(line); return; }
+      if (!groups[phone]) groups[phone] = { phone, parent: s.guardian_name || '', lines: [] };
+      groups[phone].lines.push(line);
+    });
+  }
   const day = waDayKey(ref);
   const items = Object.values(groups).map(g=>{
-    const total = g.lines.reduce((a,l)=>a+l.arrearsAmount+l.dueT,0);
-    const debt = g.lines.some(l=>l.arrearsAmount>0);
-    return Object.assign(g, { key: day + '_rap_' + g.phone, type: debt ? 'dette' : 'rappel', total, text: waReminderText(g, total, debt) });
+    const base = g.lines.reduce((a,l)=>a+l.arrearsAmount+l.dueT,0);
+    const debt = g.lines.some(l=>l.arrearsAmount>0 || (l.achDebt||0)>0);
+    const total = base + g.lines.reduce((a,l)=>a+(Number(l.achDebt)||0),0);
+    return Object.assign(g, { key: day + '_rap_' + g.phone, type: debt ? 'dette' : 'rappel', total, text: waReminderText(g, base, debt) });
   }).sort((a,b)=>b.total-a.total);
   return { items, noPhone, target };
 }
 function waReminderText(g, total, debt){
   const c = waCfg();
+  let achTot = 0;
   let t = `${c.intro}${g.parent ? ', cher parent ' + g.parent : ', cher parent'}.\n\n`;
   t += debt ? `*${DB.centerName||'AGM'}* — 🔔 Rappel de paiement et d'arriérés\n` : `*${DB.centerName||'AGM'}* — 🔔 Rappel de la mensualité\n`;
   g.lines.forEach(l=>{
@@ -9368,8 +9592,14 @@ function waReminderText(g, total, debt){
       t += `   • Arriérés : ${l.arrears.length} mois (${l.arrears.map(m=>m.label).join(', ')}) → *${fmtGNF(l.arrearsAmount)}*\n`;
     }
     if (l.dueT > 0) t += `   • Mensualité ${nDe(monthYearLabel(l.target))} : ${fmtGNF(l.dueT)}\n`;
-    if (l.arrearsAmount > 0 && l.dueT > 0) t += `   ➜ Sous-total : ${fmtGNF(l.arrearsAmount + l.dueT)}\n`;
+    let ad = 0, an = 0;
+    if (l.achDebt !== undefined){ ad = Number(l.achDebt)||0; an = Number(l.achCount)||0; }
+    else { try { const ai = achDebtInfo(l.s.id); ad = ai.total; an = ai.lines.length; } catch(e){} }
+    if (ad > 0){ t += `   • Achats à crédit (non couverts par vos dépôts) : ${an} achat(s) → *${fmtGNF(ad)}*\n`; achTot += ad; }
+    const sub = l.arrearsAmount + l.dueT + ad;
+    if ((l.arrearsAmount > 0) + (l.dueT > 0) + (ad > 0) >= 2) t += `   ➜ Sous-total : ${fmtGNF(sub)}\n`;
   });
+  total = (Number(total)||0) + achTot;
   t += `\n💰 *Montant total à régler : ${fmtGNF(total)}*\n`;
   if (!debt) t += `${payModeEcheanceText()}. Merci pour votre régularité 🙏\n`;
   t += `\n${c.footer}`;
@@ -9390,6 +9620,8 @@ function waPaymentText(p){
     const sit = nDebtSituation(s, nTodayYM() + '-99');
     if (sit.totalDue > 0) t += `\n⚠️ Reste à régler : *${fmtGNF(sit.totalDue)}* (${sit.arrears.length} mois : ${sit.arrears.map(m=>m.label).join(', ')})\n`;
     else t += `\n🎉 Votre enfant est à jour de sa scolarité.\n`;
+    let ad = 0; try { ad = achDebtInfo(s.id).total; } catch(e){}
+    if (ad > 0) t += `🛒 Achats à crédit non réglés : *${fmtGNF(ad)}*${sit.totalDue > 0 ? ` — total global : *${fmtGNF(sit.totalDue + ad)}*` : ''}\n`;
   }
   t += `\nJazakallahou khayran. Qu'Allah vous récompense.`;
   return t;
@@ -9662,27 +9894,38 @@ function waSettingsCardHtml(){
 let DETTE_SEARCH = '';
 let DETTE_FILTER = 'debt';   // 'debt' = avec dette · 'all' = tous les élèves payants
 function detteData(){
-  return nPayingStudents().map(s=>{
+  const seen = {};
+  const rows = nPayingStudents().map(s=>{
+    seen[s.id] = true;
     const ledger = studentDebtLedger(s.id);
     const unpaid = ledger.filter(m=>m.status==='impayé' || m.status==='partiel');
-    return { s, ledger, unpaid, totalDue: ledger.reduce((a,m)=>a+m.balance,0), totalPaid: ledger.reduce((a,m)=>a+Math.min(m.paid, m.due||m.paid),0) };
+    const totalDue = ledger.reduce((a,m)=>a+m.balance,0);
+    const ach = achDebtInfo(s.id);
+    return { s, ledger, unpaid, totalDue, totalPaid: ledger.reduce((a,m)=>a+Math.min(m.paid, m.due||m.paid),0),
+             achDebt: ach.total, achLines: ach.lines, globalDue: totalDue + ach.total };
   });
+  // Élèves sans mensualité (graciés…) mais avec des achats à crédit.
+  (DB.students||[]).filter(s=>s.status!=='non_actif' && !seen[s.id]).forEach(s=>{
+    const ach = achDebtInfo(s.id);
+    if (ach.total > 0) rows.push({ s, ledger:[], unpaid:[], totalDue:0, totalPaid:0, achDebt: ach.total, achLines: ach.lines, globalDue: ach.total });
+  });
+  return rows;
 }
 function detteFiltered(){
   const q = (DETTE_SEARCH||'').trim().toLowerCase();
   return detteData().filter(r=>{
-    if (DETTE_FILTER === 'debt' && r.totalDue <= 0) return false;
+    if (DETTE_FILTER === 'debt' && r.globalDue <= 0) return false;
     if (!q) return true;
     const s = r.s;
     return [s.first_name+' '+s.last_name, s.last_name+' '+s.first_name, s.matricule, s.guardian_name, s.guardian_phone]
       .join(' ').toLowerCase().includes(q);
-  }).sort((a,b)=>b.totalDue-a.totalDue || (a.s.first_name+a.s.last_name).localeCompare(b.s.first_name+b.s.last_name));
+  }).sort((a,b)=>b.globalDue-a.globalDue || (a.s.first_name+a.s.last_name).localeCompare(b.s.first_name+b.s.last_name));
 }
 function openDettesModal(){
   ensureExt();
   openModal(`
     <h3 style="margin:0 0 4px">📋 Dettes de scolarité</h3>
-    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">Élèves au statut « payant » — mois dus depuis leur inscription.</p>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">Mois de scolarité dus depuis l'inscription <b>+ achats à crédit</b> (non couverts par les dépôts du tuteur) — chaque dette est détaillée, puis totalisée.</p>
     <input class="fi" id="detteSearchInput" autocomplete="off" placeholder="🔎 Rechercher un élève : nom, matricule, tuteur, téléphone…"
       value="${esc(DETTE_SEARCH)}" oninput="DETTE_SEARCH=this.value;renderDettesList()">
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0">
@@ -9705,22 +9948,29 @@ function openDettesModal(){
 function renderDettesList(){
   const list = detteFiltered();
   const wrap = document.getElementById('dettesList'); if (!wrap) return;
-  const tot = list.reduce((a,r)=>a+r.totalDue,0);
+  const tot = list.reduce((a,r)=>a+r.globalDue,0);
+  const totS = list.reduce((a,r)=>a+r.totalDue,0), totA = list.reduce((a,r)=>a+r.achDebt,0);
   const sum = document.getElementById('detteSummary');
-  if (sum) sum.innerHTML = `<b>${list.length}</b> élève(s)${DETTE_SEARCH.trim()?' trouvé(s)':''} — total dû : <b style="color:#b91c1c">${fmtGNF(tot)}</b>`;
+  if (sum) sum.innerHTML = `<b>${list.length}</b> élève(s)${DETTE_SEARCH.trim()?' trouvé(s)':''} — scolarité : <b>${fmtGNF(totS)}</b> · achats à crédit : <b>${fmtGNF(totA)}</b><br>Total global dû : <b style="color:#b91c1c">${fmtGNF(tot)}</b>`;
   wrap.innerHTML = list.length ? list.map(r=>{
     const s = r.s;
-    return `<div style="border:1px solid var(--line);border-left:4px solid ${r.totalDue>0?'#dc2626':'#16a34a'};border-radius:10px;padding:10px 12px;margin-bottom:8px;background:var(--panel)">
+    return `<div style="border:1px solid var(--line);border-left:4px solid ${r.globalDue>0?'#dc2626':'#16a34a'};border-radius:10px;padding:10px 12px;margin-bottom:8px;background:var(--panel)">
       <div style="display:flex;justify-content:space-between;gap:8px">
         <div style="min-width:0"><b>${esc(s.first_name+' '+s.last_name)}</b>${stInactTag(s)}
           <div style="font-size:11.5px;color:var(--muted)">${esc(s.matricule||'')} · ${s.category==='internat'?'Internat':'Externat'}${s.guardian_name?' · '+esc(s.guardian_name):''}${s.guardian_phone?' · '+esc(s.guardian_phone):''}</div></div>
-        <div style="text-align:right;white-space:nowrap"><div style="font-weight:800;color:${r.totalDue>0?'#b91c1c':'#15803d'}">${fmtGNF(r.totalDue)}</div>
-          <div style="font-size:11px;color:var(--muted)">${r.unpaid.length} mois en retard</div></div>
+        <div style="text-align:right;white-space:nowrap"><div style="font-weight:800;color:${r.globalDue>0?'#b91c1c':'#15803d'}">${fmtGNF(r.globalDue)}</div>
+          <div style="font-size:11px;color:var(--muted)">${r.achDebt>0?'total global':r.unpaid.length+' mois en retard'}</div></div>
       </div>
+      ${r.achDebt>0?`<div style="font-size:12px;margin-top:7px;border-top:1px dashed var(--line);padding-top:6px;display:flex;flex-direction:column;gap:2px">
+        <div style="display:flex;justify-content:space-between;gap:8px"><span>🎓 Scolarité${r.unpaid.length?' ('+r.unpaid.length+' mois)':''}</span><b>${fmtGNF(r.totalDue)}</b></div>
+        <div style="display:flex;justify-content:space-between;gap:8px"><span>🛒 Achats à crédit (${r.achLines.length})</span><b>${fmtGNF(r.achDebt)}</b></div>
+        <div style="display:flex;justify-content:space-between;gap:8px;font-weight:800"><span>= Total global</span><span style="color:#b91c1c">${fmtGNF(r.globalDue)}</span></div>
+      </div>`:''}
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
         <button class="fb fb-ghost fb-sm" onclick="openStudentLedger('${s.id}')">📅 Détail</button>
         <button class="fb fb-ghost fb-sm" onclick="printBilanDette('${s.id}')">🖨️ Bilan</button>
-        ${r.totalDue>0 && s.guardian_phone?`<button class="fb fb-green fb-sm" onclick="waDebtReminderOne('${s.id}')">📲 Rappel</button>`:''}
+        ${r.globalDue>0 && s.guardian_phone?`<button class="fb fb-green fb-sm" onclick="waDebtReminderOne('${s.id}')">📲 Rappel</button>`:''}
+        ${r.achDebt>0?`<button class="fb fb-ghost fb-sm" onclick="closeModal();openDepotForm('${s.id}')">💰 Dépôt tuteur</button>`:''}
         ${r.totalDue>0?`<button class="fb fb-gold fb-sm" onclick="closeModal();openPaymentForm('${s.id}','${(r.unpaid[0]||{}).ym||''}',${(r.unpaid[0]||{}).balance||0})">💰 Verser</button>`:''}
       </div>
     </div>`;
@@ -9728,8 +9978,19 @@ function renderDettesList(){
 }
 function openStudentLedger(studentId){
   const s = DB.students.find(x=>x.id===studentId); if(!s) return;
-  const ledger = studentDebtLedger(studentId);
+  const ledger = paymentStatusOf(s)==='payant' ? studentDebtLedger(studentId) : [];
   const total = ledger.reduce((a,m)=>a+m.balance,0);
+  const ach = achDebtInfo(studentId);
+  const glob = total + ach.total;
+  const achHtml = ach.total > 0 ? `<div class="fl" style="margin:12px 0 6px">🛒 Achats à crédit — non couverts par les dépôts du tuteur</div>
+    ${ach.lines.map(l=>`<div style="border:1px solid var(--line);border-left:3px solid #f59e0b;border-radius:9px;padding:8px 11px;margin-bottom:6px;background:var(--panel);font-size:12.5px">
+      <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(l.item)}</b><b style="color:#b91c1c">${fmtGNF(l.due)}</b></div>
+      <div style="font-size:11.5px;color:var(--muted)">${esc(l.date||'')} · ${l.qty} × ${fmtGNF(l.pu)} = ${fmtGNF(l.total)}${l.due < l.total ? ' · déjà couvert : ' + fmtGNF(l.total - l.due) : ''}</div></div>`).join('')}
+    <button class="fb fb-green fb-sm" style="width:100%;margin-bottom:6px" onclick="closeModal();openDepotForm('${studentId}')">💰 Enregistrer un dépôt du tuteur</button>` : '';
+  const recapHtml = ach.total > 0 ? `<div style="border:1.5px solid var(--line);border-radius:10px;padding:9px 12px;margin-top:8px;font-size:12.5px">
+      <div style="display:flex;justify-content:space-between"><span>🎓 Dette de scolarité</span><b>${fmtGNF(total)}</b></div>
+      <div style="display:flex;justify-content:space-between"><span>🛒 Dette d'achats</span><b>${fmtGNF(ach.total)}</b></div>
+      <div style="display:flex;justify-content:space-between;border-top:1px solid var(--line);margin-top:5px;padding-top:5px;font-weight:800"><span>TOTAL GLOBAL</span><span style="color:#b91c1c">${fmtGNF(glob)}</span></div></div>` : '';
   const badge = st => st==='payé' ? '<span class="badge badge-green">Payé</span>'
     : st==='partiel' ? '<span class="badge badge-amber">Partiel</span>'
     : st==='impayé' ? '<span class="badge badge-red">Impayé</span>'
@@ -9749,11 +10010,13 @@ function openStudentLedger(studentId){
   openModal(`
     <h3 style="margin:0 0 4px">📅 Scolarité — ${esc(s.first_name+' '+s.last_name)}</h3>
     <p style="color:var(--muted);font-size:12px;margin:0 0 6px">Matricule ${esc(s.matricule)} — mensualité ${fmtGNF(s.monthly_fee)}</p>
-    <p style="font-size:13px;margin:0 0 12px">Total restant dû : <b style="color:${total>0?'#b91c1c':'#15803d'}">${fmtGNF(total)}</b></p>
-    <div style="max-height:46vh;overflow:auto">${rows||'<div class="empty-state">—</div>'}</div>
+    <p style="font-size:13px;margin:0 0 12px">${ach.total>0
+      ? `Scolarité : <b>${fmtGNF(total)}</b> · Achats à crédit : <b>${fmtGNF(ach.total)}</b><br>Total global restant dû : <b style="color:#b91c1c">${fmtGNF(glob)}</b>`
+      : `Total restant dû : <b style="color:${total>0?'#b91c1c':'#15803d'}">${fmtGNF(total)}</b>`}</p>
+    <div style="max-height:46vh;overflow:auto">${rows||(ach.total>0?'':'<div class="empty-state">—</div>')}${achHtml}${recapHtml}</div>
     <div style="display:flex;gap:6px;margin-top:12px;flex-wrap:wrap">
       <button class="fb fb-gold fb-sm" style="flex:1" onclick="printBilanDette('${studentId}')">🖨️ Imprimer le bilan</button>
-      ${total>0 && s.guardian_phone?`<button class="fb fb-green fb-sm" style="flex:1" onclick="waDebtReminderOne('${studentId}')">📲 Rappel WhatsApp</button>`:''}
+      ${glob>0 && s.guardian_phone?`<button class="fb fb-green fb-sm" style="flex:1" onclick="waDebtReminderOne('${studentId}')">📲 Rappel WhatsApp</button>`:''}
     </div>
     <div style="display:flex;gap:8px;margin-top:8px">
       <button class="fb fb-ghost" style="flex:1" onclick="openDettesModal()">← Retour</button>
@@ -9766,11 +10029,12 @@ function waDebtReminderOne(studentId){
   const phone = waNormPhone(s.guardian_phone);
   if (!phone){ toast('Aucun numéro de tuteur pour cet élève.'); return; }
   const target = nTodayYM();
-  const sit = nDebtSituation(s, target + '-99');
+  const sit = paymentStatusOf(s)==='payant' ? nDebtSituation(s, target + '-99') : { arrears:[], totalDue:0 };
   const g = { phone, parent: s.guardian_name||'', lines: [{ s, arrears: sit.arrears, arrearsAmount: sit.totalDue, target, dueT: 0 }] };
   const text = waReminderText(g, sit.totalDue, true);
   window.open(waLink(phone, text), '_blank');
-  waLogSet(waDayKey() + '_one_' + s.id, { t:'dette', p: phone, s:'manual', e:'', n: s.first_name+' '+s.last_name, m: sit.totalDue });
+  let glob = sit.totalDue; try { glob += achDebtInfo(s.id).total; } catch(e){}
+  waLogSet(waDayKey() + '_one_' + s.id, { t:'dette', p: phone, s:'manual', e:'', n: s.first_name+' '+s.last_name, m: glob });
 }
 
 /* ---- Moteur d'impression multi-pages (même charte que printA4) ---- */
@@ -9806,7 +10070,8 @@ function nPrintPages(title, pages, opts){
 
 /** Contenu du bilan de dettes d'un élève. */
 function bilanDettePage(s){
-  const ledger = studentDebtLedger(s.id);
+  const ledger = paymentStatusOf(s)==='payant' ? studentDebtLedger(s.id) : [];
+  const ach = achDebtInfo(s.id);
   const due = ledger.reduce((a,m)=>a+m.due,0);
   const paid = ledger.reduce((a,m)=>a+Math.min(m.paid, m.due||m.paid),0);
   const rest = ledger.reduce((a,m)=>a+m.balance,0);
@@ -9833,50 +10098,64 @@ function bilanDettePage(s){
     ${pays.length?`<div class="sec">Versements enregistrés (scolarité)</div>
     ${a4Table(['Date','N° reçu','Mois couverts','Statut','Montant'],
       pays.map(p=>[esc(p.date||''), esc(p.receipt_no||'—'), esc(nPayMonthsText(p, alloc)||'—'), p.status==='approved'?'Validé':'En attente', `<b>${fmtGNF(p.amount)}</b>`]))}`:''}
+    ${ach.total>0?`<div class="sec">Achats à crédit — non couverts par les dépôts du tuteur</div>
+    ${a4Table(['Date','Désignation','Qté','P.U.','Total','Reste dû'],
+      ach.lines.map(l=>[esc(l.date||''), esc(l.item), l.qty, fmtGNF(l.pu), fmtGNF(l.total), `<b style="color:#b91c1c">${fmtGNF(l.due)}</b>`]),
+      ['','<b>TOTAL</b>','','','',`<b style="color:#b91c1c">${fmtGNF(ach.total)}</b>`])}
+    <div class="sec">Récapitulatif des dettes</div>
+    ${a4Table(['Nature de la dette','Détail','Montant'],
+      [['Scolarité', unpaid.length ? esc(unpaid.length + ' mois : ' + unpaid.map(m=>m.label).join(', ')) : '—', fmtGNF(rest)],
+       ['Achats à crédit', esc(ach.lines.length + ' achat(s)'), fmtGNF(ach.total)]],
+      ['<b>TOTAL GLOBAL</b>','',`<b style="color:#b91c1c">${fmtGNF(rest + ach.total)}</b>`])}`:''}
     <div class="amount-box">
-      ${rest>0
-        ? `Arrêté le présent bilan à la somme de : <b class="big">${fmtGNF(rest)}</b><br>
-           <i>(${esc(nombreEnLettres(rest))} francs guinéens)</i> restant dus pour <b>${unpaid.length}</b> mois : ${esc(unpaid.map(m=>m.label).join(', '))}.`
+      ${(rest + ach.total)>0
+        ? `Arrêté le présent bilan à la somme de : <b class="big">${fmtGNF(rest + ach.total)}</b><br>
+           <i>(${esc(nombreEnLettres(Math.round(rest + ach.total)))} francs guinéens)</i>${ach.total>0
+             ? ` — dont <b>${fmtGNF(rest)}</b> de scolarité${unpaid.length?' ('+unpaid.length+' mois : '+esc(unpaid.map(m=>m.label).join(', '))+')':''} et <b>${fmtGNF(ach.total)}</b> d'achats à crédit.`
+             : ` restant dus pour <b>${unpaid.length}</b> mois : ${esc(unpaid.map(m=>m.label).join(', '))}.`}`
         : `<b style="color:#15803d">L'élève est à jour de sa scolarité à la date du ${nDateFr(new Date())}.</b>`}
     </div>`;
-  return { title:'Bilan des dettes de scolarité', subtitle: `${s.first_name} ${s.last_name} — arrêté au ${nDateFr(new Date())}`, body,
-           sgLeft:'Le comptable', sgRight:'Le fondateur', rest };
+  return { title: ach.total>0 ? 'Bilan des dettes — scolarité et achats' : 'Bilan des dettes de scolarité', subtitle: `${s.first_name} ${s.last_name} — arrêté au ${nDateFr(new Date())}`, body,
+           sgLeft:'Le comptable', sgRight:'Le fondateur', rest: rest + ach.total };
 }
 function printBilanDette(studentId){
   const s = DB.students.find(x=>x.id===studentId); if (!s) return;
   const pg = bilanDettePage(s);
   let share = '';
   if (pg.rest > 0){
-    const sit = nDebtSituation(s, nTodayYM()+'-99');
+    const sit = paymentStatusOf(s)==='payant' ? nDebtSituation(s, nTodayYM()+'-99') : { arrears:[], totalDue:0 };
     share = waReminderText({ phone:'', parent:s.guardian_name||'', lines:[{ s, arrears:sit.arrears, arrearsAmount:sit.totalDue, target:nTodayYM(), dueT:0 }] }, sit.totalDue, true);
   }
   nPrintPages('Bilan des dettes — ' + s.first_name + ' ' + s.last_name, [pg], { shareText: share, phone: s.guardian_phone });
 }
 function printBilansIndividuels(){
-  const list = detteFiltered().filter(r=>r.totalDue>0);
+  const list = detteFiltered().filter(r=>r.globalDue>0);
   if (!list.length){ toast('Aucun élève endetté dans la liste.'); return; }
   nPrintPages('Bilans individuels des dettes', list.map(r=>bilanDettePage(r.s)));
 }
 function printBilanGeneral(){
-  const list = detteFiltered().filter(r=>r.totalDue>0);
+  const list = detteFiltered().filter(r=>r.globalDue>0);
   if (!list.length){ toast('Aucun élève endetté dans la liste.'); return; }
-  const tot = list.reduce((a,r)=>a+r.totalDue,0);
+  const totS = list.reduce((a,r)=>a+r.totalDue,0), totA = list.reduce((a,r)=>a+r.achDebt,0);
+  const tot = totS + totA;
   const months = list.reduce((a,r)=>a+r.unpaid.length,0);
   const int = list.filter(r=>r.s.category==='internat'), ext = list.filter(r=>r.s.category!=='internat');
   const body = `
     ${a4Kpis([{l:'Élèves endettés',v:list.length},{l:'Mois impayés cumulés',v:months},
-              {l:'Total des dettes',v:`<span style="color:#b91c1c">${fmtGNF(tot)}</span>`},
-              {l:'Dette moyenne',v:fmtGNF(tot/list.length)}])}
-    ${a4Kpis([{l:'Internat',v:int.length+' élève(s) — '+fmtGNF(int.reduce((a,r)=>a+r.totalDue,0))},
-              {l:'Externat',v:ext.length+' élève(s) — '+fmtGNF(ext.reduce((a,r)=>a+r.totalDue,0))}])}
+              {l:'Dettes de scolarité',v:fmtGNF(totS)},{l:'Achats à crédit',v:fmtGNF(totA)}])}
+    ${a4Kpis([{l:'Total global des dettes',v:`<span style="color:#b91c1c">${fmtGNF(tot)}</span>`},
+              {l:'Dette moyenne',v:fmtGNF(tot/list.length)},
+              {l:'Internat',v:int.length+' élève(s) — '+fmtGNF(int.reduce((a,r)=>a+r.globalDue,0))},
+              {l:'Externat',v:ext.length+' élève(s) — '+fmtGNF(ext.reduce((a,r)=>a+r.globalDue,0))}])}
     <div class="sec">Liste des élèves endettés (du plus grand montant au plus petit)</div>
-    ${a4Table(['N°','Élève','Matricule','Cat.','Tuteur','Téléphone','Mois dus','Montant dû'],
+    ${a4Table(['N°','Élève','Matricule','Cat.','Tuteur','Téléphone','Mois dus','Scolarité','Achats','Total'],
       list.map((r,i)=>[i+1, `<b>${esc(r.s.first_name+' '+r.s.last_name)}</b>`, esc(r.s.matricule||'—'),
         r.s.category==='internat'?'Int.':'Ext.', esc(r.s.guardian_name||'—'), esc(r.s.guardian_phone||'—'),
-        `<span title="${esc(r.unpaid.map(m=>m.label).join(', '))}">${r.unpaid.length}</span>`, `<b style="color:#b91c1c">${fmtGNF(r.totalDue)}</b>`]),
-      ['','<b>TOTAL</b>','','','','',`<b>${months}</b>`,`<b>${fmtGNF(tot)}</b>`])}
+        `<span title="${esc(r.unpaid.map(m=>m.label).join(', '))}">${r.unpaid.length}</span>`, fmtGNF(r.totalDue), r.achDebt>0?fmtGNF(r.achDebt):'—',
+        `<b style="color:#b91c1c">${fmtGNF(r.globalDue)}</b>`]),
+      ['','<b>TOTAL</b>','','','','',`<b>${months}</b>`,`<b>${fmtGNF(totS)}</b>`,`<b>${fmtGNF(totA)}</b>`,`<b>${fmtGNF(tot)}</b>`])}
     <div class="amount-box">Arrêté le présent bilan général à la somme de <b class="big">${fmtGNF(tot)}</b>
-      <i>(${esc(nombreEnLettres(tot))} francs guinéens)</i> dus par <b>${list.length}</b> élève(s).</div>`;
+      <i>(${esc(nombreEnLettres(Math.round(tot)))} francs guinéens)</i> dus par <b>${list.length}</b> élève(s)${totA>0?` — dont <b>${fmtGNF(totS)}</b> de scolarité et <b>${fmtGNF(totA)}</b> d'achats à crédit`:''}.</div>`;
   nPrintPages('Bilan général des dettes', [{ title:'Bilan général des dettes de scolarité',
     subtitle: 'Arrêté au ' + nDateFr(new Date()) + (DETTE_SEARCH.trim() ? ' — filtre : « ' + DETTE_SEARCH.trim() + ' »' : ''),
     body, sgLeft:'Le comptable', sgRight:'Le fondateur' }]);
@@ -12562,13 +12841,14 @@ function wgFallbackBanner(key, phone, text, who, type){
     const phone = waNormPhone(s.guardian_phone);
     if (!phone) return _wdr.apply(this, arguments);
     const target = nTodayYM();
-    const sit = nDebtSituation(s, target + '-99');
+    const sit = paymentStatusOf(s)==='payant' ? nDebtSituation(s, target + '-99') : { arrears:[], totalDue:0 };
     const g = { phone, parent: s.guardian_name||'', lines: [{ s, arrears: sit.arrears, arrearsAmount: sit.totalDue, target, dueT: 0 }] };
     const text = waReminderText(g, sit.totalDue, true);
     const key = waDayKey() + '_one_' + s.id;
     const who = s.first_name + ' ' + s.last_name;
+    let glob = sit.totalDue; try { glob += achDebtInfo(s.id).total; } catch(e){}
     toast('📲 Envoi du rappel en cours…');
-    wgSendLogged(key, { t:'dette', n: who, m: sit.totalDue }, phone, text).then(ok=>{
+    wgSendLogged(key, { t:'dette', n: who, m: glob }, phone, text).then(ok=>{
       if (ok) toast('✅ Rappel de dette envoyé directement au parent de ' + who + '.');
       else wgFallbackBanner(key, phone, text, s.guardian_name || who, 'dette');
     });
