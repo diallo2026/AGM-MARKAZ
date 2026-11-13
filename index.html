@@ -1548,7 +1548,7 @@ function pageHead(title, sub, actionsHtml){
    après un déploiement, c'est que l'ancienne version est encore en
    cache sur l'appareil.
    ===================================================================== */
-const AGM_VERSION = '2026.11.13-1';
+const AGM_VERSION = '2026.11.13-2';
 
 /** Supprime tout le cache local de l'appli et recharge la dernière version. */
 async function forcerMiseAJour(){
@@ -14165,19 +14165,78 @@ let AGX_TP = null;
 function agxOpenTutorPay(key){
   if (!agxCfg().tutorPay){ toast('Activez « Paiement groupé par tuteur » dans les réglages (fondateur).'); return; }
   if (!['fondateur','admin','comptable'].includes((currentUser()||{}).role)){ toast('⛔ Non autorisé.'); return; }
-  AGX_TP = { key: key || '', year: new Date().getFullYear(), sel: {}, inc: {}, amt: {} };
+  AGX_TP = { key: key || '', year: new Date().getFullYear(), sel: {}, inc: {}, amt: {}, excl: {}, recv: '', adv: true, plan: null };
   if (key) agxTpInit(key);
   agxTpRender();
 }
 function agxTpInit(key){
   const g = agxTutorGroup(key); if (!g) return;
-  AGX_TP.key = key; AGX_TP.sel = {}; AGX_TP.inc = {}; AGX_TP.amt = {};
+  if (AGX_TP.key !== key){ AGX_TP.excl = {}; AGX_TP.recv = ''; }
+  AGX_TP.key = key; AGX_TP.sel = {}; AGX_TP.inc = {}; AGX_TP.amt = {}; AGX_TP.plan = null;
   const cur = nTodayYM();
-  g.kids.filter(s=>paymentStatusOf(s)==='payant').forEach(s=>{
+  g.kids.filter(s=>paymentStatusOf(s)==='payant' && !AGX_TP.excl[s.id]).forEach(s=>{
     let late = []; try { late = studentDebtLedger(s.id).filter(m=>m.balance>0 && m.ym <= cur).map(m=>m.ym); } catch(e){}
     AGX_TP.sel[s.id] = late.length ? late : [cur];
     AGX_TP.inc[s.id] = true;
   });
+}
+/* ---- Montant global remis par le tuteur : répartition automatique ----
+   Règle : on solde d'abord les mois dus les plus anciens (tous enfants
+   confondus, mois par mois), puis — s'il reste de l'argent — on paie les
+   mois à venir (avance), toujours mois par mois et enfant par enfant.
+   Si l'argent ne suffit pas pour un mois, ce mois est payé en partie
+   (ex. la moitié) : il apparaîtra « partiel » sur la carte de l'enfant.
+   Rien n'est enregistré tant que vous ne touchez pas « Enregistrer ». */
+function agxTpDistribute(){
+  const T = AGX_TP, g = T && T.key ? agxTutorGroup(T.key) : null; if (!g) return null;
+  const R0 = Math.max(0, Math.round(Number(T.recv)||0));
+  if (!R0){ agxTpInit(T.key); return null; }
+  const cur = nTodayYM(), kids = g.kids.filter(s=>paymentStatusOf(s)==='payant' && !T.excl[s.id] && (Number(s.monthly_fee)||0) > 0);
+  const slots = [];
+  kids.forEach((s, ki)=>{
+    const fee = Number(s.monthly_fee)||0, pm = nPaidByMonth(s.id), taken = {};
+    let ledger = []; try { ledger = studentDebtLedger(s.id); } catch(e){}
+    ledger.filter(m=>m.balance > 0).forEach(m=>{ taken[m.ym] = 1; slots.push({ s, ki, ym:m.ym, need:Math.round(m.balance), kind:'arr' }); });
+    if (T.adv){
+      const y = Number(cur.slice(0,4)) + 2, m = Number(cur.slice(5,7));
+      let due = []; try { due = nDueMonthsFor(s, ymOf(y, m)); } catch(e){}
+      due.filter(ym=>ym >= cur && !taken[ym]).forEach(ym=>{
+        let st = null; try { st = carteMonthState(s, ym, pm); } catch(e){}
+        if (st && (st.st === 'paye' || st.st === 'avant' || st.st === 'inactif')) return;
+        const need = Math.round(Math.max(0, fee - (pm[ym]||0)));
+        if (need > 0) slots.push({ s, ki, ym, need, kind: ym === cur ? 'cur' : 'adv' });
+      });
+    }
+  });
+  const rank = { arr:0, cur:1, adv:2 };
+  slots.sort((a,b)=>a.ym.localeCompare(b.ym) || rank[a.kind]-rank[b.kind] || a.ki-b.ki);
+  let R = R0; const per = {};
+  for (const sl of slots){
+    if (R <= 0) break;
+    const t = Math.min(sl.need, R); R -= t;
+    const k = per[sl.s.id] = per[sl.s.id] || { lines:[], total:0 };
+    k.lines.push({ ym: sl.ym, amt: t, need: sl.need, kind: sl.kind, partial: t < sl.need }); k.total += t;
+  }
+  g.kids.filter(s=>paymentStatusOf(s)==='payant').forEach(s=>{
+    const k = per[s.id];
+    if (k && k.total > 0){ T.inc[s.id] = true; T.sel[s.id] = k.lines.map(l=>l.ym).sort(); T.amt[s.id] = k.total; }
+    else { T.inc[s.id] = false; T.sel[s.id] = []; delete T.amt[s.id]; }
+  });
+  const sum = kind => Object.values(per).reduce((a,k)=>a + k.lines.filter(l=>kind.indexOf(l.kind) !== -1).reduce((x,l)=>x+l.amt,0), 0);
+  T.plan = { recv: R0, used: R0 - R, left: R, arr: sum(['arr']), adv: sum(['cur','adv']), kids: per,
+             partial: Object.keys(per).reduce((a,sid)=>a.concat(per[sid].lines.filter(l=>l.partial).map(l=>({ sid, ym:l.ym, amt:l.amt, need:l.need }))), []) };
+  const first = Object.values(per).reduce((a,k)=>a.concat(k.lines.map(l=>l.ym)), []).sort()[0];
+  if (first) T.year = Number(first.slice(0,4));
+  return T.plan;
+}
+function agxTpPlanLine(sid){
+  const P = AGX_TP.plan, k = P && P.kids[sid]; if (!k) return '';
+  return k.lines.map(l=>`<span style="white-space:nowrap">${esc(monthYearLabel(l.ym))} : <b>${fmtGNF(l.amt)}</b>${l.partial?` <span style="color:#b45309">(partiel, reste ${fmtGNF(l.need - l.amt)})</span>`:''}${l.kind==='adv'?' <span style="color:#2563eb">(avance)</span>':''}</span>`).join(' · ');
+}
+function agxTpRecvChange(v){
+  AGX_TP.recv = v;
+  const sc = document.getElementById('modalBody'), top = sc ? sc.scrollTop : 0;
+  agxTpDistribute(); agxTpRender(); if (sc) sc.scrollTop = top;
 }
 function agxTpKidAmount(s){
   const sel = AGX_TP.sel[s.id] || [], fee = Number(s.monthly_fee)||0, pm = nPaidByMonth(s.id);
@@ -14206,10 +14265,10 @@ function agxTpRender(){
         <label style="display:flex;gap:8px;align-items:center;font-weight:800"><input type="checkbox" style="width:18px;height:18px" ${T.inc[s.id]?'checked':''} onchange="agxTpInc('${s.id}',this.checked)"> ${esc(agxSName(s))}
           <span style="font-weight:600;font-size:11.5px;color:var(--muted)">· ${fmtGNF(s.monthly_fee)}/mois</span></label>
         <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-top:7px">${months}</div>
-        <div style="font-size:11.5px;margin-top:6px">${sel.length?'Mois : <b>'+esc(sel.slice().sort().map(monthYearLabel).join(', '))+'</b>':'<span style="color:var(--muted)">Aucun mois coché</span>'}</div>
+        <div style="font-size:11.5px;margin-top:6px">${T.plan && T.plan.kids[s.id] ? 'Répartition : ' + agxTpPlanLine(s.id) : sel.length?'Mois : <b>'+esc(sel.slice().sort().map(monthYearLabel).join(', '))+'</b>':'<span style="color:var(--muted)">Aucun mois coché</span>'}</div>
         <div class="fg2" style="margin-top:6px"><div class="fg" style="margin-bottom:0"><label class="fl">Montant pour cet enfant (GNF)</label>
-          <input class="fi" type="number" min="0" value="${val||''}" oninput="AGX_TP.amt['${s.id}']=Number(this.value)||0;agxTpTotal()"></div>
-          <div class="fg" style="margin-bottom:0;display:flex;align-items:flex-end"><button class="fb fb-ghost fb-sm" onclick="delete AGX_TP.amt['${s.id}'];agxTpRender()">↺ ${fmtGNF(auto)}</button></div></div>
+          <input class="fi" type="number" min="0" value="${val||''}" oninput="AGX_TP.amt['${s.id}']=Number(this.value)||0;AGX_TP.plan=null;agxTpTotal()"></div>
+          <div class="fg" style="margin-bottom:0;display:flex;align-items:flex-end"><button class="fb fb-ghost fb-sm" onclick="delete AGX_TP.amt['${s.id}'];AGX_TP.plan=null;agxTpRender()">↺ ${fmtGNF(auto)}</button></div></div>
       </div>`;
     }).join('') : `<div class="empty-state" style="padding:20px">Aucun enfant « payant » pour ce tuteur.</div>`;
   }
@@ -14219,10 +14278,21 @@ function agxTpRender(){
     ${g?`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:4px 0 8px">
       <button class="fb fb-ghost fb-sm" onclick="AGX_TP.year--;agxTpRender()">◀</button><span style="font-size:12px">Année : <b style="font-size:15px;color:var(--gold-light)">${T.year}</b></span>
       <button class="fb fb-ghost fb-sm" onclick="AGX_TP.year++;agxTpRender()">▶</button></div>
+      <div style="border:1.5px solid var(--gold);border-radius:12px;padding:10px 11px;margin-bottom:10px;background:rgba(212,160,60,.07)">
+        <label class="fl">💰 Montant remis par le tuteur (GNF) — facultatif</label>
+        <div style="display:flex;gap:6px"><input class="fi" type="number" min="0" inputmode="numeric" id="agxTpRecv" value="${esc(T.recv)}" placeholder="Ex. 400000" onchange="agxTpRecvChange(this.value)" onkeydown="if(event.key==='Enter'){this.blur();}">
+          <button class="fb fb-gold" style="white-space:nowrap" onclick="agxTpRecvChange((document.getElementById('agxTpRecv')||{}).value)">⚖️ Répartir</button></div>
+        <label style="display:flex;gap:8px;align-items:flex-start;font-size:12.5px;margin-top:8px"><input type="checkbox" style="margin-top:2px" ${T.adv?'checked':''} onchange="AGX_TP.adv=this.checked;if(AGX_TP.recv)agxTpRecvChange(AGX_TP.recv)"> S'il reste de l'argent après les mois dus, payer les mois à venir (avance)</label>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:4px">La somme est répartie automatiquement entre les enfants : d'abord les mois dus les plus anciens, mois par mois, puis l'avance. Un mois qui ne peut pas être payé en entier est payé en partie.</div>
+        ${T.plan?`<div style="margin-top:8px;font-size:12.5px;line-height:1.55;border-top:1px dashed var(--line);padding-top:7px">
+          Reçu : <b>${fmtGNF(T.plan.recv)}</b> → mois dus soldés : <b>${fmtGNF(T.plan.arr)}</b>${T.plan.adv?` · avances : <b style="color:#2563eb">${fmtGNF(T.plan.adv)}</b>`:''}
+          ${T.plan.partial.length?`<br>Payé en partie : ${T.plan.partial.map(x=>{ const s = (DB.students||[]).find(z=>z.id===x.sid)||{}; return '<b>'+esc(s.first_name||'')+'</b> — '+esc(monthYearLabel(x.ym))+' ('+fmtGNF(x.amt)+' sur '+fmtGNF(x.need)+')'; }).join(', ')}`:''}
+          ${T.plan.left>0?`<br><b style="color:#b91c1c">Non réparti : ${fmtGNF(T.plan.left)}</b> — ${T.adv?'tous les mois dus et à venir sont déjà couverts':'cochez « avance » pour l’affecter aux mois à venir, sinon rendez-le au tuteur'}.`:''}</div>`:''}
+      </div>
       ${body}
       <div class="fg2"><div class="fg"><label class="fl">Date du paiement</label><input class="fi" type="date" id="agxTpDate" value="${esc(T.date||todayStr())}" onchange="AGX_TP.date=this.value"></div>
         <div class="fg"><label class="fl">Motif</label><select class="fi" id="agxTpLabel" onchange="AGX_TP.label=this.value"><option ${T.label!=='Internat'?'selected':''}>Frais de scolarité</option><option ${T.label==='Internat'?'selected':''}>Internat</option></select></div></div>
-      <div class="card" style="text-align:center;margin:4px 0 10px;padding:10px"><div class="fl">Total à encaisser</div><div id="agxTpTot" style="font-size:22px;font-weight:800;color:var(--gold-light)">—</div></div>
+      <div class="card" style="text-align:center;margin:4px 0 10px;padding:10px"><div class="fl">Total à encaisser</div><div id="agxTpTot" style="font-size:22px;font-weight:800;color:var(--gold-light)">—</div><div id="agxTpGap" style="font-size:12px;margin-top:3px"></div></div>
       ${isComptable()?'<p style="color:var(--muted);font-size:11.5px;margin-bottom:8px">Les paiements attendront l’approbation du fondateur, comme d’habitude.</p>':''}
       <button class="fb fb-gold" style="width:100%" onclick="agxTpSave()">💾 Enregistrer + Reçus</button>`:''}
     <button class="fb fb-ghost" style="width:100%;margin-top:8px" onclick="closeModal()">Annuler</button>`);
@@ -14237,15 +14307,23 @@ function agxTpSearch(q){
 }
 function agxTpToggle(sid, ym, on){
   const l = (AGX_TP.sel[sid] || []).filter(x=>x!==ym); if (on) l.push(ym); AGX_TP.sel[sid] = l;
-  delete AGX_TP.amt[sid];
+  delete AGX_TP.amt[sid]; AGX_TP.plan = null;
   const sc = document.getElementById('modalBody'); const top = sc ? sc.scrollTop : 0;
   agxTpRender(); if (sc) sc.scrollTop = top;
 }
-function agxTpInc(sid, on){ AGX_TP.inc[sid] = !!on; const sc = document.getElementById('modalBody'); const top = sc ? sc.scrollTop : 0; agxTpRender(); if (sc) sc.scrollTop = top; }
+function agxTpInc(sid, on){ AGX_TP.inc[sid] = !!on; if (on) delete AGX_TP.excl[sid]; else AGX_TP.excl[sid] = true;
+  if (AGX_TP.recv) agxTpDistribute();
+  else if (on && !(AGX_TP.sel[sid]||[]).length){ const cur = nTodayYM(); let late = []; try { late = studentDebtLedger(sid).filter(m=>m.balance>0 && m.ym <= cur).map(m=>m.ym); } catch(e){} AGX_TP.sel[sid] = late.length ? late : [cur]; }
+  const sc = document.getElementById('modalBody'); const top = sc ? sc.scrollTop : 0; agxTpRender(); if (sc) sc.scrollTop = top; }
 function agxTpTotal(){
   const T = AGX_TP, g = T && T.key ? agxTutorGroup(T.key) : null, el = document.getElementById('agxTpTot'); if (!g || !el) return 0;
   const tot = g.kids.filter(s=>paymentStatusOf(s)==='payant' && T.inc[s.id]).reduce((a,s)=>a + (T.amt[s.id] !== undefined ? T.amt[s.id] : agxTpKidAmount(s)), 0);
-  el.textContent = fmtGNF(tot); return tot;
+  el.textContent = fmtGNF(tot);
+  const gp = document.getElementById('agxTpGap'), rv = Math.round(Number(T.recv)||0);
+  if (gp) gp.innerHTML = rv ? (rv === tot ? '<span style="color:#16a34a">= montant remis par le tuteur</span>'
+    : rv > tot ? `<span style="color:#b91c1c">Montant remis ${fmtGNF(rv)} — non encaissé : ${fmtGNF(rv - tot)}</span>`
+    : `<span style="color:#b45309">Dépasse le montant remis (${fmtGNF(rv)}) de ${fmtGNF(tot - rv)}</span>`) : '';
+  return tot;
 }
 let AGX_WA_MUTE = false;
 (function(){
@@ -14262,8 +14340,11 @@ function agxTpSave(){
   if (!todo.length){ toast('Cochez au moins un enfant avec un montant.'); return; }
   const noMonth = todo.find(x=>!x.months.length);
   if (noMonth){ toast('Cochez au moins un mois pour ' + agxSName(noMonth.s) + '.'); return; }
-  const total = todo.reduce((a,x)=>a+x.amount,0);
-  if (!confirm('Encaisser ' + fmtGNF(total) + ' pour ' + todo.length + ' enfant(s) de ' + (g.name||'ce tuteur') + ' ?')) return;
+  const total = todo.reduce((a,x)=>a+x.amount,0), recv = Math.round(Number(T.recv)||0);
+  let msg = 'Encaisser ' + fmtGNF(total) + ' pour ' + todo.length + ' enfant(s) de ' + (g.name||'ce tuteur') + ' ?';
+  if (recv && recv > total) msg += '\n\nMontant remis : ' + fmtGNF(recv) + ' — ' + fmtGNF(recv - total) + ' ne sont PAS encaissés (à rendre au tuteur).';
+  if (recv && recv < total) msg += '\n\nAttention : le total dépasse le montant remis (' + fmtGNF(recv) + ').';
+  if (!confirm(msg)) return;
   const pays = [];
   AGX_WA_MUTE = true;
   try { todo.forEach(x=>{ pays.push(recordPayment({ student_id: x.s.id, amount: x.amount, label, date, for_months: x.months })); }); }
@@ -14272,6 +14353,7 @@ function agxTpSave(){
   const no = 'RGT-' + y + '-' + String(recs.filter(r=>String(r.no||'').indexOf('RGT-'+y+'-')===0).length + 1).padStart(4,'0');
   const rec = { id: uid('rgt'), no, date, tutor_key: g.key, tutor_name: g.name||'', tutor_phone: g.phone||'', label,
     payment_ids: pays.map(p=>p.id), total, at: Date.now(), by: agxUName(currentUser()) };
+  if (recv){ rec.received = recv; if (recv > total) rec.returned = recv - total; }
   recs.push(rec); saveDB();
   logAction('Paiement groupé par tuteur', no + ' — ' + (g.name||'') + ' — ' + fmtGNF(total) + ' (' + todo.length + ' enfant(s))');
   closeModal();
@@ -14280,11 +14362,26 @@ function agxTpSave(){
   agxTpNotify(rec);
   if (currentPage === 'paiements') renderPaiements(); else if (currentPage === 'cartes') renderCartesPaiement();
 }
+/** Mois réglés par un versement, avec mention partiel / soldé / avance. */
+function agxPayDetail(p){
+  const s = (DB.students||[]).find(x=>x.id===p.student_id); if (!s) return paymentMonthsLabel(p);
+  let al = null; try { al = nTuitionAlloc(s.id); } catch(e){}
+  const l = al && al.byPay[p.id]; if (!l || !l.length) return paymentMonthsLabel(p);
+  const fee = Number(s.monthly_fee)||0, cur = nTodayYM(), m = {};
+  l.forEach(x=>{ m[x.ym] = (m[x.ym]||0) + x.amt; });
+  return Object.keys(m).sort().map(ym=>{
+    const a = Math.round(m[ym]), full = Math.round(al.paid[ym]||0) >= fee;
+    let t = monthYearLabel(ym);
+    if (fee && a < fee) t += full ? ' (solde ' + fmtGNF(a) + ')' : ' (' + fmtGNF(a) + ' — partiel, reste ' + fmtGNF(fee - Math.round(al.paid[ym]||0)) + ')';
+    if (ym > cur) t += ' — avance';
+    return t;
+  }).join(', ');
+}
 function agxTpText(rec){
   const pays = rec.payment_ids.map(id=>(DB.payments||[]).find(p=>p.id===id)).filter(Boolean);
   let t = `✅ *${DB.centerName||'AGM'}* — Paiement reçu\n\nCher parent ${rec.tutor_name||''}, nous confirmons la bonne réception de votre paiement groupé :\n\n`;
-  pays.forEach(p=>{ const s = (DB.students||[]).find(x=>x.id===p.student_id) || {}; t += `👤 ${agxSName(s)} — ${fmtGNF(p.amount)}${paymentMonths(p).length?' ('+paymentMonthsLabel(p)+')':''} · reçu ${p.receipt_no}\n`; });
-  t += `\n💰 Total : *${fmtGNF(rec.total)}*\n🧾 Reçu récapitulatif N° ${rec.no}\n🗓️ Date : ${rec.date}\n`;
+  pays.forEach(p=>{ const s = (DB.students||[]).find(x=>x.id===p.student_id) || {}; t += `👤 ${agxSName(s)} — ${fmtGNF(p.amount)}${paymentMonths(p).length?' ('+agxPayDetail(p)+')':''} · reçu ${p.receipt_no}\n`; });
+  t += `\n💰 Total encaissé : *${fmtGNF(rec.total)}*${rec.received?`\n💵 Montant remis : ${fmtGNF(rec.received)}${rec.returned?` (rendu : ${fmtGNF(rec.returned)})`:''}`:''}\n🧾 Reçu récapitulatif N° ${rec.no}\n🗓️ Date : ${rec.date}\n`;
   let rest = 0; pays.forEach(p=>{ const s = (DB.students||[]).find(x=>x.id===p.student_id); if (s) rest += agxKidDue(s).total; });
   t += rest > 0 ? `\n⚠️ Reste à régler pour vos enfants : *${fmtGNF(rest)}*\n` : `\n🎉 Vos enfants sont à jour.\n`;
   return t + `\nJazakallahou khayran.`;
@@ -14312,7 +14409,7 @@ function agxPrintTutorReceipt(recId){
   const pays = rec.payment_ids.map(id=>(DB.payments||[]).find(p=>p.id===id)).filter(Boolean);
   const P = nThemeColor();
   const rows = pays.map(p=>{ const s = (DB.students||[]).find(x=>x.id===p.student_id) || {};
-    return `<tr><td><b>${esc(agxSName(s))}</b><div class="mut">${esc(s.matricule||'')}</div></td><td style="font-size:8.5pt">${esc(paymentMonthsLabel(p)||p.label)}</td><td class="mono" style="font-size:8pt">${esc(p.receipt_no)}</td><td class="r"><b>${fmtGNF(p.amount)}</b></td></tr>`; }).join('');
+    return `<tr><td><b>${esc(agxSName(s))}</b><div class="mut">${esc(s.matricule||'')}</div></td><td style="font-size:8.5pt">${esc(agxPayDetail(p)||p.label)}</td><td class="mono" style="font-size:8pt">${esc(p.receipt_no)}</td><td class="r"><b>${fmtGNF(p.amount)}</b></td></tr>`; }).join('');
   const pending = pays.some(p=>p.status==='pending');
   const body = `<div class="rc">
     <div class="hd"><img src="${DB.centerLogo||AGM_LOGO}"><div><div class="nm">${esc(DB.centerName||'AGM')}</div><div class="ad">${esc(DB.centerAddress||'')}${DB.centerPhone?' · '+esc(DB.centerPhone):''}</div></div></div>
@@ -14323,6 +14420,7 @@ function agxPrintTutorReceipt(recId){
     <div class="row"><span>Reçu par</span><b>${esc(rec.by||'')}</b></div>
     <table><thead><tr><th>Enfant</th><th>Mois</th><th>Reçu</th><th>Montant</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="amt">${fmtGNF(rec.total)}</div><div class="let">${esc(nombreEnLettres(Math.round(rec.total)))} francs guinéens</div>
+    ${rec.received?`<div class="row" style="margin-top:2mm"><span>Montant remis par le tuteur</span><b>${fmtGNF(rec.received)}</b></div>${rec.returned?`<div class="row"><span>Rendu au tuteur (non encaissé)</span><b>${fmtGNF(rec.returned)}</b></div>`:''}`:''}
     <div class="st" style="color:${pending?'#b45309':P}">${pending?'EN ATTENTE D’APPROBATION':'VALIDÉ'}</div>
     <div class="sgs"><div class="agx-sgb"><div class="agx-sgl">Le payeur</div><div class="agx-sga" style="height:18mm"></div><div class="agx-sgn"></div></div>${agxSignBlock('receipts', 'Pour le markaz')}</div>
     <div class="ft">Édité le ${new Date().toLocaleString('fr-FR')} — AGM</div></div>`;
