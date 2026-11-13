@@ -1548,7 +1548,7 @@ function pageHead(title, sub, actionsHtml){
    après un déploiement, c'est que l'ancienne version est encore en
    cache sur l'appareil.
    ===================================================================== */
-const AGM_VERSION = '2026.11.13-3';
+const AGM_VERSION = '2026.11.13-4';
 
 /** Supprime tout le cache local de l'appli et recharge la dernière version. */
 async function forcerMiseAJour(){
@@ -13820,6 +13820,7 @@ function agxStampExisting(html){
         const d = w.document, _wr = d.write;
         d.write = function(){
           const a = Array.prototype.slice.call(arguments);
+          try { if (a.length === 1 && typeof a[0] === 'string' && AGX_CARTE_CTX && /<title>Cartes de paiement/.test(a[0])) a[0] = agxCartesTransform(a[0], AGX_CARTE_CTX); } catch(e){ console.warn('AGX cartes', e); }
           try { if (a.length === 1 && typeof a[0] === 'string') a[0] = agxStampExisting(a[0]); } catch(e){}
           return _wr.apply(d, a);
         };
@@ -13848,6 +13849,7 @@ function agxSettingsCardHtml(){
     ${chk('tutorCards', c.tutorCards, '👪 Cartes de paiement par tuteur', 'Recherche par tuteur, bouton « cocher selon le tuteur » et fiche groupée de tous les enfants d’un même tuteur avec leurs montants dus.')}
     ${chk('tutorPay', c.tutorPay, '💳 Paiement groupé par tuteur', 'Encaisser en une seule fois pour tous les enfants d’un tuteur (un reçu par enfant + un reçu récapitulatif). Le paiement élève par élève reste disponible.')}
     ${chk('transfer', c.transfer, '🔁 Transfert d’élèves vers un autre markaz', 'Affiche l’onglet « Transfert » : certificat de départ avec tuteur, dates d’admission et de départ, niveau, appréciations, signatures et cachet.')}
+    ${agxNewYearSettingsHtml()}
     <div style="${item}">
       <b>✍️ Signature et cachet du fondateur</b>
       <div style="${help}">Importez une photo : elle est transformée en signature / cachet thermique (fond transparent, trait net).</div>
@@ -13876,7 +13878,7 @@ function agxSettingsCardHtml(){
 function agxToggle(field, on){
   const p = {}; p[field] = !!on;
   if (!agxSaveCfg(p)) return;
-  const lbl = { tutorCards:'Cartes par tuteur', tutorPay:'Paiement groupé par tuteur', transfer:'Transfert d’élèves' }[field] || field;
+  const lbl = { tutorCards:'Cartes par tuteur', tutorPay:'Paiement groupé par tuteur', transfer:'Transfert d’élèves', yearReset:'Remise à zéro des dettes à la nouvelle année' }[field] || field;
   logAction('Réglage du fondateur', lbl + (on ? ' activé' : ' désactivé'));
   toast((on ? '✅ ' : '⏸️ ') + lbl + (on ? ' activé.' : ' désactivé — fonctionnement habituel.'));
   renderNav(); renderSettings();
@@ -13995,18 +13997,21 @@ function agxTutorGroups(){
 function agxTutorGroup(key){ return agxTutorGroups().find(g=>g.key===key) || null; }
 function agxTutorOfStudent(sid){ return agxTutorGroups().find(g=>g.kids.some(s=>s.id===sid)) || null; }
 /** Montants dus d'un enfant (scolarité + achats à crédit). */
-function agxKidDue(s){
+function agxKidDue(s, Y){
   let ledger = [], ach = { total:0, lines:[] };
   try { if (paymentStatusOf(s)==='payant') ledger = studentDebtLedger(s.id); } catch(e){}
   try { ach = achDebtInfo(s.id); } catch(e){}
-  const unpaid = ledger.filter(m=>m.balance > 0);
-  const sco = unpaid.reduce((a,m)=>a+m.balance,0);
-  return { ledger, unpaid, sco, ach: ach.total, total: sco + ach.total };
+  const all = ledger.filter(m=>m.balance > 0), y0 = Y ? ymOf(Y, 1) : '';
+  const unpaid = y0 ? all.filter(m=>m.ym >= y0) : all;
+  const prior = y0 && !agxYearReset() ? all.filter(m=>m.ym < y0) : [];
+  const sco = unpaid.reduce((a,m)=>a+m.balance,0), rep = prior.reduce((a,m)=>a+m.balance,0);
+  return { ledger, unpaid, prior, rep, sco: sco + rep, scoY: sco, ach: ach.total, total: sco + rep + ach.total };
 }
-function agxTutorTotals(g){
-  const rows = g.kids.map(s=>({ s, d: agxKidDue(s) }));
-  return { rows, sco: rows.reduce((a,r)=>a+r.d.sco,0), ach: rows.reduce((a,r)=>a+r.d.ach,0), total: rows.reduce((a,r)=>a+r.d.total,0),
-           fees: g.kids.filter(s=>paymentStatusOf(s)==='payant').reduce((a,s)=>a+(Number(s.monthly_fee)||0),0) };
+function agxTutorTotals(g, Y){
+  const Yr = Y || (typeof CARTE === 'object' && CARTE.year) || new Date().getFullYear();
+  const rows = g.kids.map(s=>({ s, d: agxKidDue(s, Yr), fee: agxFeeAt(s, ymOf(Yr, 1)) }));
+  return { rows, Y: Yr, sco: rows.reduce((a,r)=>a+r.d.sco,0), rep: rows.reduce((a,r)=>a+r.d.rep,0), ach: rows.reduce((a,r)=>a+r.d.ach,0), total: rows.reduce((a,r)=>a+r.d.total,0),
+           fees: rows.filter(r=>paymentStatusOf(r.s)==='payant').reduce((a,r)=>a+r.fee,0) };
 }
 
 /* ---- Onglet Cartes de paiement : outils par tuteur (si activé) ---- */
@@ -14107,10 +14112,11 @@ function agxPrintTutorFiche(keys){
   const Y = (typeof CARTE === 'object' && CARTE.year) || new Date().getFullYear();
   const P = nThemeColor(), A = nAccentColor();
   const page = g => {
-    const t = agxTutorTotals(g);
+    const t = agxTutorTotals(g, Y), showRep = !agxYearReset() && t.rep > 0;
     const head = `<div class="hd"><img src="${DB.centerLogo||AGM_LOGO}"><div><div class="nm">${esc(DB.centerName||'AGM')}</div><div class="ad">${esc(DB.centerAddress||'')}${DB.centerPhone?' · '+esc(DB.centerPhone):''}</div></div><div class="yr">${Y}</div></div>`;
     const kids = t.rows.map(r=>`<tr><td>${r.s.photo?`<img class="ph" src="${r.s.photo}">`:''}</td><td><b>${esc(agxSName(r.s))}</b><div class="mut">${esc(r.s.matricule||'')} · ${r.s.category==='internat'?'Internat':'Externat'}${paymentStatusOf(r.s)!=='payant'?' · Gracié':''}</div></td>
-      <td class="r">${paymentStatusOf(r.s)==='payant'?fmtGNF(r.s.monthly_fee):'—'}</td>
+      <td class="r">${paymentStatusOf(r.s)==='payant'?fmtGNF(r.fee):'—'}</td>
+      ${showRep?`<td style="font-size:8pt;text-align:right">${r.d.rep?`<b style="white-space:nowrap">${fmtGNF(r.d.rep)}</b><div class="mut">${r.d.prior.length} mois${r.d.prior.length>1?' : '+esc(r.d.prior[0].label)+' → '+esc(r.d.prior[r.d.prior.length-1].label):' : '+esc(r.d.prior[0].label)}</div>`:'—'}</td>`:''}
       <td style="font-size:8pt">${r.d.unpaid.length?esc(r.d.unpaid.map(m=>m.label).join(', ')):'<span style="color:#15803d">À jour</span>'}</td>
       <td class="r">${fmtGNF(r.d.sco)}</td><td class="r">${r.d.ach?fmtGNF(r.d.ach):'—'}</td><td class="r"><b>${fmtGNF(r.d.total)}</b></td></tr>`).join('');
     const grid = Array.from({length:12},(_,i)=>{
@@ -14128,9 +14134,9 @@ function agxPrintTutorFiche(keys){
       <div class="tt">FICHE DE PAIEMENT DU TUTEUR</div>
       <div class="box"><div><span>Tuteur</span><b>${esc(g.name||'—')}</b></div><div><span>Téléphone</span><b>${esc(g.phone||'—')}</b></div>
         <div><span>Enfants au markaz</span><b>${g.kids.length}</b></div><div><span>Mensualité totale du foyer</span><b>${fmtGNF(t.fees)}</b></div></div>
-      <div class="sec">Enfants sous sa tutelle et montants dus (arrêtés au ${nDateFr(new Date())})</div>
-      <table><thead><tr><th style="width:12mm"></th><th>Élève</th><th>Mensualité</th><th>Mois impayés</th><th>Scolarité due</th><th>Achats</th><th>Total dû</th></tr></thead>
-      <tbody>${kids}</tbody><tfoot><tr><td></td><td colspan="3"><b>TOTAL DU FOYER</b></td><td class="r"><b>${fmtGNF(t.sco)}</b></td><td class="r"><b>${t.ach?fmtGNF(t.ach):'—'}</b></td><td class="r"><b style="color:#b91c1c">${fmtGNF(t.total)}</b></td></tr></tfoot></table>
+      <div class="sec">Enfants sous sa tutelle et montants dus (arrêtés au ${nDateFr(new Date())})${agxYearReset()?` — dettes antérieures à ${Y} arrêtées (remise à zéro)`:''}</div>
+      <table><thead><tr><th style="width:12mm"></th><th>Élève</th><th>Mensualité ${Y}</th>${showRep?`<th>Report avant ${Y}</th>`:''}<th>Mois impayés ${Y}</th><th>Scolarité due</th><th>Achats</th><th>Total dû</th></tr></thead>
+      <tbody>${kids}</tbody><tfoot><tr><td></td><td colspan="${showRep?4:3}"><b>TOTAL DU FOYER</b></td><td class="r"><b>${fmtGNF(t.sco)}</b></td><td class="r"><b>${t.ach?fmtGNF(t.ach):'—'}</b></td><td class="r"><b style="color:#b91c1c">${fmtGNF(t.total)}</b></td></tr></tfoot></table>
       <div class="amt">${t.total>0?`Montant total dû par le tuteur : <b>${fmtGNF(t.total)}</b> <i>(${esc(nombreEnLettres(Math.round(t.total)))} francs guinéens)</i>`:`<b style="color:#15803d">Tous les enfants de ce tuteur sont à jour.</b>`}</div>
       <div class="sec">Suivi mensuel ${Y} — tous les enfants</div>
       <table class="gr"><thead><tr><th>Mois</th>${g.kids.map(s=>`<th>${esc(s.first_name)}</th>`).join('')}<th>Attendu</th><th>Visa</th></tr></thead><tbody>${grid}</tbody></table>
@@ -14175,7 +14181,7 @@ function agxTpInit(key){
   AGX_TP.key = key; AGX_TP.sel = {}; AGX_TP.inc = {}; AGX_TP.amt = {}; AGX_TP.plan = null;
   const cur = nTodayYM();
   g.kids.filter(s=>paymentStatusOf(s)==='payant' && !AGX_TP.excl[s.id]).forEach(s=>{
-    let late = []; try { late = studentDebtLedger(s.id).filter(m=>m.balance>0 && m.ym <= cur).map(m=>m.ym); } catch(e){}
+    let late = []; try { late = studentDebtLedger(s.id).filter(m=>m.balance>0 && m.ym <= cur && m.ym >= agxTpFirstYM()).map(m=>m.ym); } catch(e){}
     AGX_TP.sel[s.id] = late.length ? late : [cur];
     AGX_TP.inc[s.id] = true;
   });
@@ -14192,21 +14198,22 @@ function agxTpInit(key){
    Rien n'est enregistré tant que vous ne touchez pas « Enregistrer ». */
 function agxTpKids(g){
   const T = AGX_TP, d = s => String(s.arrival_date || s.enrollment_date || '9999-12-31').slice(0,10);
-  return g.kids.filter(s=>paymentStatusOf(s)==='payant' && !T.excl[s.id] && (Number(s.monthly_fee)||0) > 0)
+  const cur = nTodayYM(), nxt = ymOf(new Date().getFullYear() + 1, 12);
+  return g.kids.filter(s=>paymentStatusOf(s)==='payant' && !T.excl[s.id] && (agxFeeAt(s, cur) > 0 || agxFeeAt(s, nxt) > 0))
     .sort((a,b)=>d(a).localeCompare(d(b)) || String(a.birth_date||'9999').localeCompare(String(b.birth_date||'9999')) || agxSName(a).localeCompare(agxSName(b)));
 }
 /** Mois encore à payer (dus puis à venir), moins ce qui est déjà prévu dans la fenêtre (planned). */
 function agxTpSlots(kids, planned){
   const cur = nTodayYM(), out = [], H = ymOf(Number(cur.slice(0,4)) + 10, Number(cur.slice(5,7)));
   kids.forEach((s, ki)=>{
-    const fee = Number(s.monthly_fee)||0, pm = nPaidByMonth(s.id), taken = {}, pl = (planned && planned[s.id]) || {};
+    const pm = nPaidByMonth(s.id), taken = {}, pl = (planned && planned[s.id]) || {}, y0 = agxTpFirstYM();
     let ledger = []; try { ledger = studentDebtLedger(s.id); } catch(e){}
-    ledger.filter(m=>m.balance > 0).forEach(m=>{ taken[m.ym] = 1; const need = Math.round(m.balance - (pl[m.ym]||0)); if (need > 0) out.push({ s, ki, ym:m.ym, need, kind:'arr' }); });
+    ledger.filter(m=>m.balance > 0 && m.ym >= y0).forEach(m=>{ taken[m.ym] = 1; const need = Math.round(m.balance - (pl[m.ym]||0)); if (need > 0) out.push({ s, ki, ym:m.ym, need, kind:'arr' }); });
     let due = []; try { due = nDueMonthsFor(s, H); } catch(e){}
     due.filter(ym=>ym >= cur && !taken[ym]).forEach(ym=>{
       let st = null; try { st = carteMonthState(s, ym, pm); } catch(e){}
       if (st && (st.st === 'paye' || st.st === 'avant' || st.st === 'inactif')) return;
-      const need = Math.round(Math.max(0, fee - (pm[ym]||0)) - (pl[ym]||0));
+      const need = Math.round(Math.max(0, agxFeeAt(s, ym) - (pm[ym]||0)) - (pl[ym]||0));
       if (need > 0) out.push({ s, ki, ym, need, kind: ym === cur ? 'cur' : 'adv' });
     });
   });
@@ -14248,8 +14255,8 @@ function agxTpDistributeRest(){
   const rest = recv - total; if (!(rest > 0)) return null;
   const planned = {};
   kids.filter(s=>T.inc[s.id]).forEach(s=>{
-    const fee = Number(s.monthly_fee)||0, pm = nPaidByMonth(s.id); let r = amtOf(s); const pl = planned[s.id] = {};
-    (T.sel[s.id]||[]).slice().sort().forEach(ym=>{ const room = Math.max(0, fee - (pm[ym]||0)); const t = Math.min(room, r); if (t > 0){ pl[ym] = t; r -= t; } });
+    const pm = nPaidByMonth(s.id); let r = amtOf(s); const pl = planned[s.id] = {};
+    (T.sel[s.id]||[]).slice().sort().forEach(ym=>{ const room = Math.max(0, agxFeeAt(s, ym) - (pm[ym]||0)); const t = Math.min(room, r); if (t > 0){ pl[ym] = t; r -= t; } });
   });
   const per = {}, left = agxTpFill(agxTpSlots(kids, planned), rest, per);
   Object.keys(per).forEach(sid=>{
@@ -14280,9 +14287,11 @@ function agxTpRecvChange(v){
   agxTpDistribute(); agxTpRender(); if (sc) sc.scrollTop = top;
 }
 function agxTpKidAmount(s){
-  const sel = AGX_TP.sel[s.id] || [], fee = Number(s.monthly_fee)||0, pm = nPaidByMonth(s.id);
-  return sel.reduce((a,ym)=>a + Math.max(0, fee - (pm[ym]||0)), 0);
+  const sel = AGX_TP.sel[s.id] || [], pm = nPaidByMonth(s.id);
+  return sel.reduce((a,ym)=>a + Math.max(0, agxFeeAt(s, ym) - (pm[ym]||0)), 0);
 }
+/** Remise à zéro activée : le paiement groupé ne prend pas les dettes des années précédentes. */
+function agxTpFirstYM(){ return agxYearReset() ? ymOf(new Date().getFullYear(), 1) : '0000-00'; }
 function agxTpRender(){
   const T = AGX_TP; const g = T.key ? agxTutorGroup(T.key) : null;
   const picker = `<div class="fg"><label class="fl">Tuteur * (nom, téléphone ou enfant)</label>
@@ -14304,7 +14313,7 @@ function agxTpRender(){
       }).join('');
       return `<div style="border:1px solid var(--line);border-left:4px solid ${T.inc[s.id]?'var(--brand)':'var(--line)'};border-radius:11px;padding:9px 10px;margin-bottom:8px;background:var(--panel)">
         <label style="display:flex;gap:8px;align-items:center;font-weight:800"><input type="checkbox" style="width:18px;height:18px" ${T.inc[s.id]?'checked':''} onchange="agxTpInc('${s.id}',this.checked)"> ${esc(agxSName(s))}
-          <span style="font-weight:600;font-size:11.5px;color:var(--muted)">· ${fmtGNF(s.monthly_fee)}/mois</span></label>
+          <span style="font-weight:600;font-size:11.5px;color:var(--muted)">· ${fmtGNF(agxFeeAt(s, nTodayYM()))}/mois</span></label>
         <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-top:7px">${months}</div>
         <div style="font-size:11.5px;margin-top:6px">${T.plan && T.plan.kids[s.id] ? 'Répartition : ' + agxTpPlanLine(s.id) : sel.length?'Mois : <b>'+esc(sel.slice().sort().map(monthYearLabel).join(', '))+'</b>':'<span style="color:var(--muted)">Aucun mois coché</span>'}</div>
         <div class="fg2" style="margin-top:6px"><div class="fg" style="margin-bottom:0"><label class="fl">Montant pour cet enfant (GNF)</label>
@@ -14354,7 +14363,7 @@ function agxTpToggle(sid, ym, on){
 }
 function agxTpInc(sid, on){ AGX_TP.inc[sid] = !!on; if (on) delete AGX_TP.excl[sid]; else AGX_TP.excl[sid] = true;
   if (AGX_TP.recv) agxTpDistribute();
-  else if (on && !(AGX_TP.sel[sid]||[]).length){ const cur = nTodayYM(); let late = []; try { late = studentDebtLedger(sid).filter(m=>m.balance>0 && m.ym <= cur).map(m=>m.ym); } catch(e){} AGX_TP.sel[sid] = late.length ? late : [cur]; }
+  else if (on && !(AGX_TP.sel[sid]||[]).length){ const cur = nTodayYM(); let late = []; try { late = studentDebtLedger(sid).filter(m=>m.balance>0 && m.ym <= cur && m.ym >= agxTpFirstYM()).map(m=>m.ym); } catch(e){} AGX_TP.sel[sid] = late.length ? late : [cur]; }
   const sc = document.getElementById('modalBody'); const top = sc ? sc.scrollTop : 0; agxTpRender(); if (sc) sc.scrollTop = top; }
 function agxTpTotal(){
   const T = AGX_TP, g = T && T.key ? agxTutorGroup(T.key) : null, el = document.getElementById('agxTpTot'); if (!g || !el) return 0;
@@ -14415,10 +14424,10 @@ function agxPayDetail(p){
   const s = (DB.students||[]).find(x=>x.id===p.student_id); if (!s) return paymentMonthsLabel(p);
   let al = null; try { al = nTuitionAlloc(s.id); } catch(e){}
   const l = al && al.byPay[p.id]; if (!l || !l.length) return paymentMonthsLabel(p);
-  const fee = Number(s.monthly_fee)||0, cur = nTodayYM(), m = {};
+  const cur = nTodayYM(), m = {};
   l.forEach(x=>{ m[x.ym] = (m[x.ym]||0) + x.amt; });
   return Object.keys(m).sort().map(ym=>{
-    const a = Math.round(m[ym]), full = Math.round(al.paid[ym]||0) >= fee;
+    const fee = agxFeeAt(s, ym), a = Math.round(m[ym]), full = Math.round(al.paid[ym]||0) >= fee;
     let t = monthYearLabel(ym);
     if (fee && a < fee) t += full ? ' (solde ' + fmtGNF(a) + ')' : ' (' + fmtGNF(a) + ' — partiel, reste ' + fmtGNF(fee - Math.round(al.paid[ym]||0)) + ')';
     if (ym > cur) t += ' — avance';
@@ -15707,6 +15716,358 @@ function agxSheetUnlock(){
     printA4('Résultats — classement par ordre de mérite', body, { subtitle: monthLabel(m)+' '+y+' — feuille validée', sgLeft:"L'enseignant", sgRight:'La direction' });
   };
 })();
+
+/* ---------------------------------------------------------------------
+   15) NOUVELLE ANNÉE — remise à zéro des dettes (réglable), cartes
+       vierges / cartes avec récapitulatif de l'année précédente,
+       mensualité minimum par année (internat / externat).
+       La fiche de chaque élève garde le montant enregistré : rien n'est
+       réécrit. Les calculs (cartes, dettes, rappels, paiements) utilisent
+       le montant ajusté, mois par mois, à partir de la date d'effet.
+   ------------------------------------------------------------------- */
+function agxYearReset(){ return !!(DB && DB.agxCfg && DB.agxCfg.yearReset === true); }
+function agxFeeMin(){
+  const f = (DB && DB.agxCfg && DB.agxCfg.feeMin && typeof DB.agxCfg.feeMin === 'object') ? DB.agxCfg.feeMin : {};
+  return { on: f.on === true, years: (f.years && typeof f.years === 'object') ? f.years : {}, custom: (f.custom && typeof f.custom === 'object') ? f.custom : {} };
+}
+function agxFeeOverrides(){ const o = DB && DB.agxCfg && DB.agxCfg.feeOverride; return (o && typeof o === 'object') ? o : {}; }
+function agxFeeMinOn(){ const F = agxFeeMin(); return F.on && Object.keys(F.years).length > 0; }
+/** Règle en vigueur pour un mois : celle de l'année la plus récente dont la date d'effet est atteinte. */
+function agxFeeRuleFor(ym){
+  const F = agxFeeMin(); let best = null;
+  Object.keys(F.years).forEach(y=>{ const r = F.years[y]; if (!r) return; const from = String(r.from || (y + '-01'));
+    if (from <= ym && (!best || Number(y) > Number(best.year))) best = Object.assign({ year: y }, r, { from }); });
+  return best;
+}
+let AGX_SWAP = null;        // montants d'origine pendant un calcul d'affichage (jamais enregistrés)
+function agxBaseFee(s){ return (AGX_SWAP && s && AGX_SWAP.has(s.id)) ? AGX_SWAP.get(s.id) : (Number(s && s.monthly_fee) || 0); }
+/** Mensualité appliquée à un élève pour un mois donné. */
+function agxFeeAt(s, ym){
+  const base = agxBaseFee(s);
+  if (!s || !agxFeeMinOn() || paymentStatusOf(s) !== 'payant') return base;
+  const r = agxFeeRuleFor(ym); if (!r) return base;
+  const ov = agxFeeOverrides()[s.id]; if (ov && Number(ov.at||0) >= Number(r.at||0)) return base;      // montant modifié par le personnel
+  const cu = (agxFeeMin().custom[r.year] || {})[s.id];
+  if (cu !== undefined && cu !== null && cu !== '') return Number(cu) || 0;                             // montant particulier fixé par le fondateur
+  const min = Number(s.category === 'internat' ? r.internat : r.externat) || 0;
+  return Math.max(base, min);
+}
+/** Exécute un affichage avec les mensualités du mois « ym » (restaurées aussitôt, jamais enregistrées). */
+function agxWithFees(ym, fn){
+  if (!agxFeeMinOn() || AGX_SWAP) return fn();
+  const m = new Map();
+  (DB.students||[]).forEach(s=>{ if (!s || paymentStatusOf(s) !== 'payant') return; const f = agxFeeAt(s, ym), b = Number(s.monthly_fee)||0; if (f !== b){ m.set(s.id, b); s.monthly_fee = f; } });
+  if (!m.size) return fn();
+  AGX_SWAP = m;
+  try { return fn(); }
+  finally { (DB.students||[]).forEach(s=>{ if (s && m.has(s.id)) s.monthly_fee = m.get(s.id); }); AGX_SWAP = null; }
+}
+(function(){
+  if (window._agxFeeHooked) return; window._agxFeeHooked = true;
+  /* Sécurité : si une sauvegarde survenait pendant un affichage, les montants d'origine sont remis avant d'écrire. */
+  const _save = saveDB;
+  saveDB = function(){
+    if (!AGX_SWAP) return _save.apply(this, arguments);
+    const m = AGX_SWAP, tmp = new Map();
+    (DB.students||[]).forEach(s=>{ if (s && m.has(s.id)){ tmp.set(s.id, s.monthly_fee); s.monthly_fee = m.get(s.id); } });
+    AGX_SWAP = null;
+    try { return _save.apply(this, arguments); }
+    finally { (DB.students||[]).forEach(s=>{ if (s && tmp.has(s.id)) s.monthly_fee = tmp.get(s.id); }); AGX_SWAP = m; }
+  };
+  /* 1) État d'un mois sur la carte : avec la mensualité de ce mois. */
+  const _cms = carteMonthState;
+  carteMonthState = function(s, ym, paidMap){
+    if (!agxFeeMinOn() || !s) return _cms.apply(this, arguments);
+    const f = agxFeeAt(s, ym);
+    if (f === (Number(s.monthly_fee)||0)) return _cms.apply(this, arguments);
+    return _cms.call(this, Object.assign({}, s, { monthly_fee: f }), ym, paidMap);
+  };
+  /* 2) Répartition des versements : chaque mois avec sa propre mensualité. */
+  const _alloc = nTuitionAlloc;
+  nTuitionAlloc = function(studentId){
+    if (!agxFeeMinOn()) return _alloc.apply(this, arguments);
+    const s = (DB.students||[]).find(x=>x.id===studentId);
+    if (!s || paymentStatusOf(s) !== 'payant') return _alloc.apply(this, arguments);
+    const feeOf = ym => agxFeeAt(s, ym);
+    const R = { paid:{}, dates:{}, byPay:{}, auto:{}, left:{} };
+    const pays = (DB.payments||[]).filter(p=>p.student_id===studentId && nIsTuitionPay(p, s))
+      .sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')) || String(a.receipt_no||'').localeCompare(String(b.receipt_no||'')));
+    const add = (p, ym, amt)=>{ if (!(amt > 0)) return; R.paid[ym] = (R.paid[ym]||0) + amt;
+      if (String(p.date||'') > String(R.dates[ym]||'')) R.dates[ym] = String(p.date||''); (R.byPay[p.id] = R.byPay[p.id] || []).push({ ym, amt }); };
+    pays.filter(p=>paymentMonths(p).length).forEach(p=>{
+      const ms = paymentMonths(p).map(String).filter((v,i,a)=>/^\d{4}-\d{2}$/.test(v) && a.indexOf(v)===i).sort();
+      if (!ms.length) return;
+      let r = Number(p.amount)||0;
+      if (ms.some(ym=>feeOf(ym) > 0)){
+        ms.forEach(ym=>{ const room = Math.max(0, feeOf(ym) - (R.paid[ym]||0)); const t = Math.min(room, r); if (t > 0){ add(p, ym, t); r -= t; } });
+        if (r > 0.0001) ms.forEach(ym=>add(p, ym, r/ms.length));
+      } else ms.forEach(ym=>add(p, ym, r/ms.length));
+    });
+    const loose = pays.filter(p=>!paymentMonths(p).length);
+    if (loose.length){
+      let due = []; try { due = nDueMonthsFor(s).filter(ym=>feeOf(ym) > 0); } catch(e){}
+      loose.forEach(p=>{ R.auto[p.id] = true; let r = Number(p.amount)||0;
+        for (let i = 0; i < due.length && r > 0.0001; i++){ const ym = due[i]; const room = Math.max(0, feeOf(ym) - (R.paid[ym]||0)); if (room <= 0) continue; const t = Math.min(room, r); add(p, ym, t); r -= t; }
+        if (r > 0.0001) R.left[p.id] = r; });
+    }
+    return R;
+  };
+  /* 3) Dettes mois par mois : montant dû = mensualité du mois. */
+  const _led = studentDebtLedger;
+  studentDebtLedger = function(studentId){
+    const rows = _led.apply(this, arguments);
+    if (!agxFeeMinOn()) return rows;
+    const s = (DB.students||[]).find(x=>x.id===studentId);
+    if (!s || paymentStatusOf(s) !== 'payant') return rows;
+    const fin = payModeCfg().mode === 'fin', t = todayStr();
+    return rows.map(m=>{
+      if (m.status === 'inactif') return m;
+      const f = agxFeeAt(s, m.ym); if (f === m.due) return m;
+      const paid = Number(m.paid)||0;
+      let balance = Math.max(0, f - paid), status = f <= 0 ? 'n/a' : (paid >= f ? 'payé' : (paid > 0 ? 'partiel' : 'impayé'));
+      let cur = m.ym === nTodayYM(); try { const p = oPeriod(s, m.ym); cur = p.from <= t && t <= p.to; } catch(e){}
+      if (fin && cur && balance > 0){ balance = 0; status = 'en cours'; }
+      return Object.assign({}, m, { due: f, balance, status });
+    });
+  };
+  /* 4) Affichages qui lisent directement la mensualité : montant du mois concerné. */
+  const _wq = waBuildReminderQueue;
+  waBuildReminderQueue = function(ref){ const self = this, args = arguments; let tg = nTodayYM(); try { tg = waReminderTarget(ref || new Date()); } catch(e){} return agxWithFees(tg, ()=>_wq.apply(self, args)); };
+  const _rcl = renderCartesList;
+  renderCartesList = function(){ const self = this, args = arguments; return agxWithFees(ymOf(CARTE.year, 1), ()=>_rcl.apply(self, args)); };
+  const _oce = openCarteEleve;
+  openCarteEleve = function(){ const self = this, args = arguments; return agxWithFees(ymOf(CARTE.year, 1), ()=>_oce.apply(self, args)); };
+  const _osl = openStudentLedger;
+  openStudentLedger = function(){ const self = this, args = arguments; return agxWithFees(nTodayYM(), ()=>_osl.apply(self, args)); };
+  const _bdp = bilanDettePage;
+  bilanDettePage = function(){ const self = this, args = arguments; return agxWithFees(nTodayYM(), ()=>_bdp.apply(self, args)); };
+  /* 5) Formulaire de paiement : montant suggéré = somme des mensualités des mois cochés. */
+  const _upmh = updatePayMonthHint, _asa = applySuggestedAmount;
+  updatePayMonthHint = function(){
+    if (!agxFeeMinOn()) return _upmh.apply(this, arguments);
+    const hint = document.getElementById('payMonthHint'); if (!hint) return;
+    const sel = pmsSorted('pay'), sid = (document.getElementById('payStudentId')||{}).value, s = DB.students.find(x=>x.id===sid);
+    const sum = s ? sel.reduce((a,ym)=>a + agxFeeAt(s, ym), 0) : 0;
+    let late = []; if (s && sum > 0){ try { late = studentDebtLedger(s.id).filter(m=>m.balance>0).map(m=>m.ym); } catch(e){} }
+    const miss = late.filter(ym=>sel.indexOf(ym) === -1);
+    hint.innerHTML = esc(sel.length + ' mois sélectionné(s)' + (sum ? ' — montant suggéré : ' + fmtGNF(sum) : '')) +
+      (miss.length ? `<div style="margin-top:4px;color:#b91c1c">Mois en retard : ${esc(late.map(monthYearLabel).join(', '))}
+        <button type="button" class="fb fb-ghost fb-sm" style="margin-left:4px;padding:2px 8px" onclick="payCheckLate()">⤵ Cocher les mois en retard</button></div>` : '');
+  };
+  applySuggestedAmount = function(){
+    if (!agxFeeMinOn()) return _asa.apply(this, arguments);
+    const sel = pmsSorted('pay'), sid = (document.getElementById('payStudentId')||{}).value, s = DB.students.find(x=>x.id===sid);
+    const sum = s ? sel.reduce((a,ym)=>a + agxFeeAt(s, ym), 0) : 0;
+    if (!sel.length || !sum){ toast('Sélectionnez un élève et au moins un mois.'); return; }
+    document.getElementById('payAmount').value = sum; toast('Montant suggéré appliqué : ' + fmtGNF(sum));
+  };
+  /* 6) Montant modifié à la main par le personnel : il prime sur la mensualité minimum. */
+  const _ses = saveEditStudent;
+  saveEditStudent = function(id){
+    const s0 = (DB.students||[]).find(x=>x.id===id), before = s0 ? Number(s0.monthly_fee)||0 : null;
+    const r = _ses.apply(this, arguments);
+    try {
+      const s = (DB.students||[]).find(x=>x.id===id);
+      if (s && before !== null && (Number(s.monthly_fee)||0) !== before && agxFeeMinOn()){
+        const c = Object.assign({}, DB.agxCfg || {}); c.feeOverride = Object.assign({}, c.feeOverride || {});
+        c.feeOverride[id] = { at: Date.now(), fee: Number(s.monthly_fee)||0, by: agxUName(currentUser()) };
+        DB.agxCfg = c; saveDB();
+        logAction('Mensualité modifiée à la main', agxSName(s) + ' : ' + fmtGNF(s.monthly_fee) + ' (prime sur la mensualité minimum)');
+      }
+    } catch(e){}
+    return r;
+  };
+  const hint = (inputId, cat) => {
+    try {
+      if (!agxFeeMinOn()) return; const el = document.getElementById(inputId); if (!el || document.getElementById(inputId+'AgxHint')) return;
+      const r = agxFeeRuleFor(nTodayYM()) || agxFeeRuleFor(ymOf(new Date().getFullYear()+1, 1)); if (!r) return;
+      const d = document.createElement('div'); d.id = inputId + 'AgxHint'; d.style.cssText = 'font-size:11px;color:var(--muted);margin-top:4px';
+      d.innerHTML = `Mensualité minimum ${esc(r.year)} : internat <b>${fmtGNF(r.internat)}</b> · externat <b>${fmtGNF(r.externat)}</b>. Un montant inférieur est ajusté automatiquement, sauf si vous le modifiez ici.`;
+      el.parentNode.appendChild(d);
+    } catch(e){}
+  };
+  const _oes = openEditStudent;
+  openEditStudent = function(){ const r = _oes.apply(this, arguments); hint('edMonthly'); return r; };
+  const _osf = openStudentForm;
+  openStudentForm = function(){ const r = _osf.apply(this, arguments); hint('stMonthly'); return r; };
+})();
+
+/* ---- Cartes de paiement d'une nouvelle année : vierges, ou avec le récapitulatif de l'année précédente ---- */
+let AGX_CARTE_PENDING = null, AGX_CARTE_BYPASS = false, AGX_CARTE_CTX = null;
+function agxIsNewYear(Y){ const d = new Date(), y = d.getFullYear(); return Y > y || (Y === y && d.getMonth() < 2); }
+(function(){
+  if (window._agxCartesNYHooked) return; window._agxCartesNYHooked = true;
+  const _pc = printCartes;
+  printCartes = function(ids){
+    const self = this;
+    if (!AGX_CARTE_BYPASS && Array.isArray(ids) && ids.length && agxIsNewYear(CARTE.year)){ AGX_CARTE_PENDING = ids.slice(); agxCartesChoice(); return; }
+    return agxWithFees(ymOf(CARTE.year, 1), ()=>_pc.call(self, ids));
+  };
+  const _rcp = renderCartesPaiement;
+  renderCartesPaiement = function(){
+    const r = _rcp.apply(this, arguments);
+    try {
+      const acts = document.querySelector('#pageContent .page-head > div:last-child');
+      if (acts) acts.insertAdjacentHTML('beforeend', ` <button class="fb fb-ghost" onclick="agxCartesNewYearSel()">🆕 Cartes nouvelle année</button>`);
+      const F = agxFeeMin(), r1 = agxFeeMinOn() ? agxFeeRuleFor(ymOf(CARTE.year, 12)) : null;
+      const sb = document.querySelector('#pageContent .search-bar');
+      if (sb && (r1 || agxYearReset())) sb.insertAdjacentHTML('beforebegin', `<div style="font-size:12px;border:1px solid var(--line);border-left:4px solid var(--gold);border-radius:10px;padding:8px 11px;margin-bottom:10px;background:var(--panel)">
+        ${r1?`💰 Mensualité minimum ${esc(r1.year)} : internat <b>${fmtGNF(r1.internat)}</b> · externat <b>${fmtGNF(r1.externat)}</b> (montants supérieurs inchangés)`:''}
+        ${agxYearReset()?`${r1?'<br>':''}🗓️ Nouvelle année : les dettes des années précédentes ne sont pas reportées sur les cartes ${CARTE.year}.`:''}</div>`);
+    } catch(e){}
+    return r;
+  };
+})();
+function agxCartesNewYearSel(){
+  const ids = Object.keys(CARTE.sel).filter(k=>CARTE.sel[k] && DB.students.some(s=>s.id===k));
+  if (!ids.length){ toast('Cochez d’abord les élèves (ou « Tout sélectionner », ou « Cocher selon le tuteur »).'); return; }
+  AGX_CARTE_PENDING = ids; agxCartesChoice();
+}
+function agxCartesChoice(){
+  const Y = CARTE.year, P = Y - 1, n = (AGX_CARTE_PENDING||[]).length;
+  const btn = (mode, ic, t, d, cls) => `<button class="fb ${cls||'fb-ghost'}" style="width:100%;justify-content:flex-start;text-align:left;margin-bottom:8px;padding:11px 13px" onclick="agxPrintCartesMode('${mode}')">
+    <span style="font-size:20px">${ic}</span><span><b>${t}</b><div style="font-size:11.5px;font-weight:500;opacity:.85">${d}</div></span></button>`;
+  openModal(`<h3 style="margin:0 0 4px">🆕 Cartes de paiement ${Y}</h3>
+    <p style="color:var(--muted);font-size:12.5px;margin:0 0 12px">${n} élève(s). Comment imprimer les cartes de la nouvelle année ?</p>
+    ${btn('blank','📄','Cartes vierges '+Y,'Aucun mois prérempli, aucune dette : cartes neuves pour l’année '+Y+'.','fb-gold')}
+    ${btn('recap','📋','Nouvelles cartes '+Y+' + récapitulatif '+P,'Chaque carte porte le résumé des paiements de '+P+' et '+(agxYearReset()?'indique que le reste de '+P+' est arrêté (remis à zéro).':'le reste dû, reporté sur '+Y+'.'),'fb-green')}
+    ${btn('normal','🖨️','Cartes habituelles','Impression actuelle (mois déjà payés préremplis si l’option est cochée).')}
+    <div style="font-size:11.5px;color:var(--muted);border-top:1px solid var(--line);padding-top:8px">Report des dettes : <b>${agxYearReset()?'remise à zéro à la nouvelle année':'les dettes de '+P+' suivent la carte de '+Y}</b> (réglage du fondateur).</div>
+    <button class="fb fb-ghost" style="width:100%;margin-top:10px" onclick="closeModal()">Annuler</button>`);
+}
+function agxPrintCartesMode(mode){
+  const ids = (AGX_CARTE_PENDING||[]).slice(); if (!ids.length) return;
+  closeModal();
+  const keep = CARTE.prefill;
+  AGX_CARTE_BYPASS = true; AGX_CARTE_CTX = { mode, ids, year: CARTE.year };
+  if (mode === 'blank') CARTE.prefill = false;
+  try { printCartes(ids); } finally { AGX_CARTE_BYPASS = false; AGX_CARTE_CTX = null; CARTE.prefill = keep; }
+}
+/** Récapitulatif d'un élève pour l'année P (affiché sur la carte de l'année P+1). */
+function agxYearRecap(s, P){
+  const Y = P + 1, pm = nPaidByMonth(s.id); let paid = 0, rest = 0;
+  const cells = Array.from({length:12},(_,i)=>{
+    const ym = ymOf(P, i+1); const st = carteMonthState(s, ym, pm); paid += st.paid || 0;
+    if ((st.st === 'impaye' || st.st === 'partiel') && ym <= nTodayYM()) rest += st.balance || 0;
+    const sym = { paye:'✓', partiel:'◐', impaye:'✖', avenir:'·', avant:'—', inactif:'⏸' }[st.st] || '·';
+    const col = { paye:'#16a34a', partiel:'#d97706', impaye:'#dc2626' }[st.st] || '#94a3b8';
+    return `<span class="rcm"><i>${esc(agxMonShort(i+1))}</i><b style="color:${col}">${sym}</b></span>`;
+  }).join('');
+  let prior = 0; try { prior = studentDebtLedger(s.id).filter(m=>m.ym < ymOf(Y,1)).reduce((a,m)=>a+(Number(m.balance)||0),0); } catch(e){}
+  const older = Math.max(0, prior - rest);
+  const reset = agxYearReset();
+  const tail = (rest + older) > 0
+    ? (reset ? `Reste ${P}${older?' et antérieur':''} : <b>${fmtGNF(rest + older)}</b> — <b>arrêté (remis à zéro)</b>`
+             : `Reste ${P}${older?' + antérieur ('+fmtGNF(older)+')':''} : <b style="color:#b91c1c">${fmtGNF(rest + older)}</b> — <b>reporté sur ${Y}</b>`)
+    : `<b style="color:#15803d">À jour pour ${P} ✓</b>`;
+  return `<div class="agx-rc-box"><div class="rct">Récapitulatif ${P} — versé : <b>${fmtGNF(paid)}</b></div><div class="rcs">${cells}</div><div class="rcf">${tail}</div></div>`;
+}
+/** Transforme la page des cartes (récapitulatif, cartes vierges) au moment de l'impression. */
+function agxCartesTransform(html, ctx){
+  if (!ctx || ctx.mode === 'normal') return html;
+  const studs = ctx.ids.map(id=>(DB.students||[]).find(s=>s.id===id)).filter(Boolean);
+  const P = nThemeColor();
+  let css = '';
+  if (ctx.mode === 'recap'){
+    css = `.carte.agx-rc td{height:7.4mm}.carte.agx-rc.has-nb td{height:6.6mm}
+      .agx-rc-box{border:1.2px solid ${P};border-radius:2mm;padding:1mm 1.8mm;margin-top:1.4mm;background:#f6faf7;font-size:7pt}
+      .rct{font-weight:700;margin-bottom:.6mm}.rcs{display:flex;gap:.5mm}.rcm{flex:1;text-align:center;border:1px solid #cbd5e1;border-radius:1mm;background:#fff;line-height:1.05;padding:.3mm 0}
+      .rcm i{display:block;font-style:normal;font-size:5.6pt;color:#555}.rcm b{font-size:7.5pt}.rcf{margin-top:.6mm}`;
+    let k = 0;
+    html = html.replace(/<div class="carte/g, ()=>'<div class="carte agx-rc');
+    html = html.replace(/<div class="ftr">/g, ()=>{ const s = studs[Math.floor(k++/2)]; return (s ? agxYearRecap(s, ctx.year - 1) : '') + '<div class="ftr">'; });
+  }
+  return html.replace('</style>', css + '</style>');
+}
+
+/* ---- Réglages : remise à zéro + mensualité minimum ---- */
+function agxNewYearSettingsHtml(F_){
+  const F = isFondateur(), fm = agxFeeMin(), yrs = Object.keys(fm.years).sort();
+  const item = 'border:1px solid var(--line);border-radius:11px;padding:11px 12px;margin-bottom:9px;background:var(--panel)';
+  const help = 'font-size:11.5px;color:var(--muted);margin-top:4px';
+  return `<div style="${item}"><label style="display:flex;gap:9px;align-items:flex-start;font-weight:700;cursor:${F?'pointer':'default'}">
+      <input type="checkbox" style="margin-top:3px;flex-shrink:0;width:18px;height:18px" ${agxYearReset()?'checked':''} ${F?`onchange="agxToggle('yearReset',this.checked)"`:'disabled'}>
+      <span>🗓️ Nouvelle année : remettre à zéro les dettes de l’année précédente</span></label>
+      <div style="${help}">Activé : les cartes et fiches de paiement par tuteur de la nouvelle année n’affichent pas les dettes des années précédentes (elles sont arrêtées) et le paiement groupé par tuteur règle d’abord l’année en cours. Désactivé : les dettes de l’année précédente suivent la fiche de paiement de l’année suivante. Les montants restent enregistrés dans « Dettes de scolarité ».</div></div>
+    <div style="${item}"><label style="display:flex;gap:9px;align-items:flex-start;font-weight:700;cursor:${F?'pointer':'default'}">
+      <input type="checkbox" style="margin-top:3px;flex-shrink:0;width:18px;height:18px" ${fm.on?'checked':''} ${F?`onchange="agxFeeMinToggle(this.checked)"`:'disabled'}>
+      <span>💰 Mensualité minimum (frais de scolarité) par année</span></label>
+      <div style="${help}">Activé : sur les nouvelles cartes, tout montant inférieur au minimum (internat / externat) est ajusté automatiquement pour tous les élèves payants ; les montants supérieurs restent tels quels. Un montant modifié ensuite à la main par le personnel prime. Chaque nouvelle année : nouveau minimum si vous le changez, sinon l’ancien est maintenu.</div>
+      ${yrs.length?`<div style="margin-top:8px;font-size:12.5px">${yrs.map(y=>{ const r = fm.years[y]; const nC = Object.keys(fm.custom[y]||{}).length; return `<div style="display:flex;justify-content:space-between;gap:8px;border-top:1px dashed var(--line);padding:5px 0"><span><b>${esc(y)}</b> (dès ${esc(monthYearLabel(r.from||y+'-01'))}) : internat <b>${fmtGNF(r.internat)}</b> · externat <b>${fmtGNF(r.externat)}</b>${nC?' · '+nC+' montant(s) particulier(s)':''}</span>${F?`<button class="fb fb-ghost fb-sm" onclick="agxFeeMinForm('${y}')">✏️</button>`:''}</div>`; }).join('')}</div>`:''}
+      ${F?`<button class="fb fb-gold fb-sm" style="margin-top:8px" onclick="agxFeeMinForm()">💰 ${yrs.length?'Définir / modifier une année':'Définir la mensualité minimum'}</button>`:''}</div>`;
+}
+function agxFeeMinToggle(on){
+  if (!isFondateur()) return;
+  const fm = Object.assign({}, (DB.agxCfg && DB.agxCfg.feeMin) || {}); fm.on = !!on;
+  if (on && !Object.keys(fm.years||{}).length){ fm.on = false; if (agxSaveCfg({ feeMin: fm })) agxFeeMinForm(); return; }
+  if (!agxSaveCfg({ feeMin: fm })) return;
+  logAction('Réglage du fondateur', 'Mensualité minimum ' + (on ? 'activée' : 'désactivée'));
+  toast(on ? '✅ Mensualité minimum appliquée.' : '⏸️ Mensualité minimum désactivée — montants enregistrés de chaque élève.');
+  renderSettings();
+}
+let AGX_FM = null;
+function agxFeeMinForm(year){
+  if (!isFondateur()){ toast('⛔ Réservé au fondateur.'); return; }
+  const d = new Date(), cy = d.getFullYear(), fm = agxFeeMin();
+  const Y = Number(year) || (d.getMonth() >= 9 ? cy + 1 : cy);
+  const prev = fm.years[String(Y)] || (agxFeeRuleFor(ymOf(Y, 12)) || {});
+  AGX_FM = { year: Y, internat: prev.internat || '', externat: prev.externat || '', custom: Object.assign({}, fm.custom[String(Y)] || {}) };
+  agxFeeMinRender();
+}
+function agxFeeMinRender(){
+  const A = AGX_FM, cy = new Date().getFullYear(), Y = A.year;
+  const yOpts = [cy, cy+1, cy+2, cy+3].map(y=>`<option value="${y}" ${y===Y?'selected':''}>${y}</option>`).join('');
+  const from = Y > cy ? ymOf(Y, 1) : nTodayYM();
+  const ov = agxFeeOverrides();
+  const below = (DB.students||[]).filter(s=>s.status!=='non_actif' && paymentStatusOf(s)==='payant').map(s=>{
+    const min = Number(s.category==='internat' ? A.internat : A.externat) || 0, base = Number(s.monthly_fee)||0;
+    return { s, base, min };
+  }).filter(x=>x.min > 0 && x.base < x.min).sort((a,b)=>(a.s.category||'').localeCompare(b.s.category||'') || agxSName(a.s).localeCompare(agxSName(b.s)));
+  openModal(`<h3 style="margin:0 0 4px">💰 Mensualité minimum</h3>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">Les montants supérieurs restent inchangés. Les montants inférieurs sont ajustés automatiquement dès ${esc(monthYearLabel(from))} (rien n’est réécrit dans les fiches des élèves, les mois passés ne changent pas).</p>
+    <div class="fg"><label class="fl">Année</label><select class="fi" onchange="agxFeeMinCollect();AGX_FM.year=Number(this.value);const p=agxFeeMin().years[this.value]||agxFeeRuleFor(this.value+'-12')||{};AGX_FM.internat=p.internat||AGX_FM.internat;AGX_FM.externat=p.externat||AGX_FM.externat;AGX_FM.custom=Object.assign({},agxFeeMin().custom[this.value]||{});agxFeeMinRender()">${yOpts}</select></div>
+    <div class="fg2"><div class="fg"><label class="fl">🏠 Internat — minimum / mois</label><input class="fi" type="number" min="0" id="fmInt" value="${esc(A.internat)}" onchange="agxFeeMinCollect();agxFeeMinRender()"></div>
+      <div class="fg"><label class="fl">🚶 Externat — minimum / mois</label><input class="fi" type="number" min="0" id="fmExt" value="${esc(A.externat)}" onchange="agxFeeMinCollect();agxFeeMinRender()"></div></div>
+    <div class="fl" style="margin-top:4px">${below.length} élève(s) au-dessous du minimum — ajustés automatiquement</div>
+    <div style="font-size:11.5px;color:var(--muted);margin-bottom:6px">Laissez vide pour appliquer le minimum, ou saisissez un montant particulier pour un élève.</div>
+    <div style="max-height:40vh;overflow:auto">${below.map(x=>`<div style="display:flex;gap:8px;align-items:center;border:1px solid var(--line);border-radius:9px;padding:6px 8px;margin-bottom:5px;background:var(--panel)">
+      <div style="flex:1;min-width:0;font-size:12.5px"><b>${esc(agxSName(x.s))}</b><div style="font-size:11px;color:var(--muted)">${x.s.category==='internat'?'Internat':'Externat'} · actuel ${fmtGNF(x.base)} → <b>${fmtGNF(x.min)}</b>${ov[x.s.id]?' · <span style="color:#b45309">modifié à la main le '+esc(new Date(ov[x.s.id].at).toLocaleDateString('fr-FR'))+'</span>':''}</div></div>
+      <input class="fi" type="number" min="0" style="max-width:120px;padding:7px" data-fmc="${x.s.id}" placeholder="${x.min}" value="${esc(A.custom[x.s.id] ?? '')}"></div>`).join('') || '<div style="font-size:12px;color:var(--muted)">Aucun élève sous le minimum.</div>'}</div>
+    <div style="display:flex;gap:8px;margin-top:12px"><button class="fb fb-gold" style="flex:1" onclick="agxFeeMinSave()">💾 Enregistrer et activer</button><button class="fb fb-ghost" onclick="closeModal()">Annuler</button></div>
+    ${agxFeeMin().years[String(Y)]?`<button class="fb fb-danger fb-sm" style="width:100%;margin-top:8px" onclick="agxFeeMinDelete()">🗑️ Supprimer le minimum de ${Y}</button>`:''}`);
+}
+function agxFeeMinCollect(){
+  const A = AGX_FM; if (!A) return;
+  const i = document.getElementById('fmInt'), e = document.getElementById('fmExt');
+  if (i) A.internat = i.value; if (e) A.externat = e.value;
+  document.querySelectorAll('[data-fmc]').forEach(el=>{ const v = el.value.trim(); if (v === '') delete A.custom[el.dataset.fmc]; else A.custom[el.dataset.fmc] = Math.max(0, Number(v)||0); });
+}
+function agxFeeMinSave(){
+  agxFeeMinCollect(); const A = AGX_FM; if (!A || !isFondateur()) return;
+  const ni = Math.max(0, Number(A.internat)||0), ne = Math.max(0, Number(A.externat)||0);
+  if (!ni && !ne){ toast('Indiquez au moins un minimum (internat ou externat).'); return; }
+  const cy = new Date().getFullYear(), Y = String(A.year);
+  const fm = JSON.parse(JSON.stringify((DB.agxCfg && DB.agxCfg.feeMin) || {}));
+  fm.years = fm.years || {}; fm.custom = fm.custom || {};
+  const old = fm.years[Y];
+  const from = (old && old.from) || (Number(Y) > cy ? Y + '-01' : nTodayYM());
+  const changed = !old || Number(old.internat) !== ni || Number(old.externat) !== ne;
+  fm.years[Y] = { internat: ni, externat: ne, from, at: changed ? Date.now() : (old.at || Date.now()) };
+  fm.custom[Y] = Object.assign({}, A.custom);
+  fm.on = true;
+  if (!agxSaveCfg({ feeMin: fm })) return;
+  logAction('Mensualité minimum', Y + ' — internat ' + fmtGNF(ni) + ' · externat ' + fmtGNF(ne) + ' (dès ' + monthYearLabel(from) + ')');
+  closeModal(); toast('✅ Mensualité minimum ' + Y + ' enregistrée et appliquée.'); renderSettings();
+}
+function agxFeeMinDelete(){
+  const A = AGX_FM; if (!A || !isFondateur()) return; const Y = String(A.year);
+  if (!confirm('Supprimer la mensualité minimum de ' + Y + ' ? (Le minimum de l’année précédente, s’il existe, continue de s’appliquer.)')) return;
+  const fm = JSON.parse(JSON.stringify((DB.agxCfg && DB.agxCfg.feeMin) || {}));
+  if (fm.years) delete fm.years[Y]; if (fm.custom) delete fm.custom[Y];
+  if (!Object.keys(fm.years||{}).length) fm.on = false;
+  if (!agxSaveCfg({ feeMin: fm })) return;
+  logAction('Mensualité minimum', Y + ' supprimée'); closeModal(); renderSettings();
+}
 
 </script>
 </body>
