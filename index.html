@@ -1548,7 +1548,7 @@ function pageHead(title, sub, actionsHtml){
    après un déploiement, c'est que l'ancienne version est encore en
    cache sur l'appareil.
    ===================================================================== */
-const AGM_VERSION = '2026.11.13-4';
+const AGM_VERSION = '2026.11.14-1';
 
 /** Supprime tout le cache local de l'appli et recharge la dernière version. */
 async function forcerMiseAJour(){
@@ -14627,6 +14627,11 @@ function agxPrintTransfer(id){
   const doc = agxGet('agxDocs').find(d=>d.id===x.doc_id) || { no: x.doc_no||'—', code:'—', type:'TRF', holder_name:x.name, date: todayStr() };
   const dup = agxBumpPrint(doc);
   const P = nThemeColor(), c = agxCfg(), s = (DB.students||[]).find(st=>st.id===x.student_id) || {};
+  const arc = (DB.archives||[]).filter(a=>a.student_id===x.student_id && a.snapshot && a.snapshot.photo).slice(-1)[0];
+  const photo = s.photo || (arc && arc.snapshot.photo) || '';
+  const g = agxSign(), stampOn = !!c.sign.transfert && !!g.stamp;
+  const photoBox = `<div class="ph">${photo?`<img class="phi" src="${esc(photo)}" alt="">`:`<div class="phe">Coller la photo<br>de l’élève</div>`}
+      ${photo && stampOn?`<img class="phs" src="${g.stamp}" alt="">`:''}<div class="phl">Photo de l’élève</div></div>`;
   const f = agxFounderName(), city = agxCity();
   let money = '';
   if (x.show_money && s.id){ const d = agxKidDue(s); money = d.total > 0 ? `Reste dû à la date de départ : <b>${fmtGNF(d.total)}</b>.` : 'L’élève est à jour de ses paiements à la date de départ.'; }
@@ -14637,7 +14642,7 @@ function agxPrintTransfer(id){
       ${agxOfficialHead('شهادة انتقال')}
       <div class="tt">CERTIFICAT DE TRANSFERT</div><div class="st">Certificat de départ — autorisation de quitter le markaz</div>
       <p class="intro">Je soussigné(e) <b>${esc(f||'…………………………')}</b>, ${esc(c.signTitle.replace(/^le\s+/i,'').replace(/^la\s+/i,'').toLowerCase())} du markaz <b>${esc(DB.centerName||'')}</b>, certifie que l’élève désigné ci-dessous a fréquenté notre établissement et est autorisé(e) à le quitter pour poursuivre sa formation ailleurs.</p>
-      <table class="t">
+      <div class="tw"><table class="t">
         ${row('Nom et prénom', `<b style="font-size:12pt">${esc(x.name)}</b>`)}
         ${row('Matricule', `<span class="mono">${esc(x.matricule)}</span>`)}
         ${row('Date de naissance', esc(x.birth_date?oFr(x.birth_date):''))}
@@ -14650,7 +14655,7 @@ function agxPrintTransfer(id){
         ${row('Enseignant', esc(agxTeacherName(x.teacher_id)))}
         ${row('Markaz / école d’accueil', esc(x.destination))}
         ${row('Motif du départ', esc(x.reason))}
-      </table>
+      </table>${photoBox}</div>
       <div class="ap"><div class="aph">Appréciation de l’enseignant : <b>${esc(x.teacher_mention||'')}</b> · Conduite : <b>${esc(x.conduct||'')}</b></div><div class="apt">${esc(x.teacher_appr||'')}</div></div>
       <div class="ap"><div class="aph">Appréciation du fondateur : <b>${esc(x.founder_mention||'')}</b></div><div class="apt">${esc(x.founder_appr||'')}</div></div>
       ${money?`<p class="intro" style="margin:2mm 0">${money}</p>`:''}
@@ -14677,7 +14682,13 @@ function agxCertCss(){
     .intro{font-family:Georgia,serif;font-size:10pt;line-height:1.42;text-align:justify;margin:1.2mm 0}
     table.t{width:100%;border-collapse:collapse;margin:1.5mm 0;font-size:9.6pt;background:rgba(255,255,255,.72)}
     table.t td{border-bottom:1px dotted #9aa;padding:1.05mm 2mm;vertical-align:top}
-    td.l{width:58mm;color:#444;font-size:8.8pt;text-transform:uppercase;letter-spacing:.03em}
+    td.l{width:50mm;color:#444;font-size:8.8pt;text-transform:uppercase;letter-spacing:.03em}
+    .tw{display:flex;gap:3.5mm;align-items:flex-start}.tw table.t{flex:1;min-width:0}
+    .ph{flex:0 0 32mm;position:relative;margin-top:1.5mm;text-align:center}
+    .phi{width:32mm;height:40mm;object-fit:cover;border-radius:1.5mm;border:.5mm solid #fff;box-shadow:0 0 0 .35mm ${P};display:block;background:#fff}
+    .phe{width:32mm;height:40mm;border:.4mm dashed ${P};border-radius:1.5mm;display:flex;align-items:center;justify-content:center;font-size:7.5pt;color:#777;background:rgba(255,255,255,.8)}
+    .phs{position:absolute;left:-7mm;top:24mm;width:20mm;height:20mm;object-fit:contain;opacity:.8;mix-blend-mode:multiply;transform:rotate(-12deg)}
+    .phl{font-size:7pt;color:#555;margin-top:1mm}
     .ap{border:1px solid ${A};border-left:4px solid ${P};border-radius:2mm;padding:1.3mm 3mm;margin:1.2mm 0;background:rgba(255,255,255,.8)}
     .aph{font-size:9.5pt}.apt{font-family:Georgia,serif;font-style:italic;font-size:10pt;min-height:5mm;margin-top:.8mm}
     .fait{text-align:right;font-family:Georgia,serif;font-size:10pt;margin:1.5mm 0 0}
